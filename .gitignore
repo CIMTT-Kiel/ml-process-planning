@@ -16,7 +16,10 @@ reports/*
 .venv/
 
 # mac files
-*.DS_Store
+**.DS_Store
 
 #checkpoints
 *.pth
+
+#uv files
+uv.lock
