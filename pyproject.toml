@@ -3,7 +3,7 @@ requires = ["setuptools>=67", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "CadToSeq"
+name = "mpp"
 version = "0.1.0"
 description = "mpp"
 authors = [{ name = "Kruse Michel", email = "michel.kruse@fh-kiel.de" }]
