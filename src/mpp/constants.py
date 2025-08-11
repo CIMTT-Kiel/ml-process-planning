@@ -1,20 +1,29 @@
 """
 This module defines several constants used throughout the project.
 
-The module provides access to NamedTupel objects which group all constants and make them available via attribute access.
+It provides centralized access to project-wide paths (e.g., data, reports, models)
+as well as vocabulary definitions for process steps.
+
+Constants are grouped using NamedTuple objects for convenient attribute-based access.
 
 Examples
 --------
 >>> from project import constants
->>> # get Path object for the project root directory
->>> constants.PATHS.ROOT
+>>> constants.PATHS.ROOT  # Path to the project root
+>>> constants.VOCAB["bohren"]  # Get token ID for a process step
 """
+#standard imports
 from pathlib import Path
 from collections import namedtuple
 
+# -------------------------------
+# Define project-wide filesystem paths
+# -----
 
-# Paths
+# Determine ROOT
 _ROOT = Path(__file__).parents[2]
+
+# Dictionary of relevant project paths
 _path_dict = {
     "ROOT":                 _ROOT,
     "REPORT":       _ROOT / "reports",
@@ -29,23 +38,32 @@ _path_dict = {
 
 }
 
+# -------------------------------
+# Define token vocabulary
+# -------------------------------
+
+# Vocabulary for manufacturing process steps and special tokens
 VOCAB = {
-    "START": 0,
-    "fräsen": 1,
-    "schleifen": 2,
-    "bohren": 3,
-    "schweißen": 4,
-    "drehen": 5,
-    "prüfen":6,
-    "kontrollieren": 7,
+    "fräsen": 0,
+    "schleifen": 1,
+    "bohren": 2,
+    "schweißen": 3,
+    "drehen": 4,
+    "prüfen":5,
+    "kontrollieren": 6,
+    "START": 7,
     "STOP": 8,
     "PAD": 9,
 }
 
+#check if all keys and values are unique
+assert len(VOCAB) == len(set(VOCAB.values())),  ValueError("VOCAB values must be unique")
+assert len(VOCAB) == len(set(VOCAB.keys())),  ValueError("VOCAB keys must be unique")
+
+# Inverted vocabulary: maps token IDs back to string labels
 INV_VOCAB = {v: k for k, v in VOCAB.items()}
 
-
-
+# Convert path dictionary to a namedtuple for attribute-style access
 Paths = namedtuple("Paths", list(_path_dict.keys()))
 PATHS = Paths(**_path_dict)
 

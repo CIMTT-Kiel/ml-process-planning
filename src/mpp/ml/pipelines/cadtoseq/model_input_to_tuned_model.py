@@ -9,15 +9,29 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 
 #custom imports
-from cadtoseq.ml.modules.step_decoder_module import ARMSTM
-from cadtoseq.ml.modules.fabricad_datamodule import Fabricad_datamodule
-from cadtoseq.constants import PATHS
+from src.mpp.ml.models.sequence.cadtoseq_module import ARMSTM
+from mpp.ml.datasets.fabricad_datamodule import Fabricad_datamodule
+from mpp.constants import PATHS
 
 
 
 def get_dataloaders(batch_size=32):
-    """Get train and validation dataloaders for the Fabricad dataset."""
+    """
+    Initializes and returns the training and validation dataloaders for the Fabricad dataset.
 
+    This function creates an instance of the Fabricad_datamodule, sets it up for training,
+    and returns the corresponding PyTorch DataLoader objects.
+
+    Parameters
+    ----------
+    batch_size : int, optional
+        Number of samples per batch to load. Default is 32.
+
+    Returns
+    -------
+    tuple of torch.utils.data.DataLoader
+        A tuple containing (train_loader, validation_loader).
+    """
     # Initialize the Fabricad datamodule
     dataset = Fabricad_datamodule(batch_size=batch_size)
     dataset.setup(stage="fit")
@@ -32,8 +46,26 @@ batch_size = 85
 train_loader, val_loader = get_dataloaders(batch_size=batch_size)
 
 def objective(trial):
-    """Objective function for Optuna hyperparameter optimization."""
+    """
+    Objective function for Optuna hyperparameter optimization.
 
+    This function:
+    - Samples hyperparameters from a given Optuna trial.
+    - Initializes the model with these hyperparameters.
+    - Sets up early stopping, checkpointing, and MLflow logging.
+    - Trains the model using PyTorch Lightning's Trainer.
+    - Returns the validation loss to guide the optimization.
+
+    Parameters
+    ----------
+    trial : optuna.trial.Trial
+        The Optuna trial object used to suggest hyperparameters.
+
+    Returns
+    -------
+    float
+        The validation loss of the trained model, used as the objective to minimize.
+    """
     # Hyperparameter-sampling
     dropout = trial.suggest_float("dropout", 0.2, 0.5)
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
@@ -95,6 +127,21 @@ def objective(trial):
 
 
 def main():
+    """
+    Entry point for training the best model using hyperparameters optimized by Optuna.
+
+    This function:
+    - Sets up the MLflow experiment.
+    - Runs Optuna to find the best hyperparameters.
+    - Initializes the best model with the optimal configuration.
+    - Trains the model using early stopping and checkpointing.
+    - Logs training metrics and saves the best checkpoint.
+
+    Side Effects
+    ------------
+    - Creates and writes to `mlruns/` directory for MLflow tracking.
+    - Saves model checkpoints to the `PATHS.CKPT_DIR` directory.
+    """
     mlflow.set_tracking_uri("file:./mlruns") 
     mlflow.set_experiment("cadtoseq")
 

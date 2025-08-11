@@ -3,7 +3,7 @@ import torch
 import numpy as np
 
 #custom imports
-from cadtoseq.constants import VOCAB
+from mpp.constants import VOCAB
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path

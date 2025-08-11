@@ -1,13 +1,54 @@
+#standard imports
+import logging
+
+#third party imports
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pytorch_lightning as pl
 
 #custom imports
-from cadtoseq.constants import VOCAB
-from cadtoseq.ml.datasets.fabricad import Fabricad
+from mpp.constants import VOCAB
+from mpp.ml.datasets.fabricad import Fabricad
+from mpp.constants import VOCAB
 
-# AutoRegressiveManufacturingStepTransformerDecoder(ARMSTD) 
+logging.basicConfig(
+    format="%(asctime)s %(levelname)8s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.DEBUG,
+)
+
+logger = logging.getLogger(__name__)
+formatter = logging.Formatter("%(asctime)s %(levelname)8s - %(message)s")
+
+
 class ARMSTD(nn.Module):
+    """
+    AutoRegressive Manufacturing Step Transformer Decoder (ARMSTD)
+
+    This model predicts sequences of manufacturing process steps based on an input
+    set of feature vectors. It uses a Transformer decoder architecture in an autoregressive
+    fashion to generate token sequences, such as process step plans.
+
+    Parameters
+    ----------
+    input_dim : int, optional
+        Dimensionality of each input vector in the set (default: 32).
+    set_size : int, optional
+        Number of vectors in each input set (default: 1024).
+    embed_dim : int, optional
+        Dimensionality of the embedding space (default: 512).
+    num_steps : int, optional
+        Number of distinct step tokens in the vocabulary (default: len(VOCAB)).
+    max_seq_len : int, optional
+        Maximum length of the generated process sequence (excluding START token) (default: 6).
+    num_layers : int, optional
+        Number of layers in the Transformer decoder (default: 6).
+    nhead : int, optional
+        Number of attention heads (default: 8).
+    dropout : float, optional
+        Dropout rate used in various layers (default: 0.1).
+    """
     def __init__(self, input_dim=32, set_size=1024, embed_dim=512, num_steps=VOCAB.__len__(), max_seq_len=6, num_layers=6, nhead=8, dropout=0.1):
         super().__init__()
 
@@ -31,6 +72,23 @@ class ARMSTD(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, vector_set, tgt_seq):
+        """
+        Forward pass of the Transformer decoder.
+
+        Parameters
+        ----------
+        vector_set : torch.Tensor
+            Input tensor of shape (batch_size, set_size, input_dim), representing feature vectors.
+        tgt_seq : torch.Tensor
+            Tensor of token indices representing the target sequence 
+            (batch_size, seq_len), usually used during teacher forcing.
+
+        Returns
+        -------
+        torch.Tensor
+            Output logits of shape (batch_size, seq_len, num_steps), 
+            which can be used with CrossEntropyLoss.
+        """
         batch_size = vector_set.size(0)
         memory = self.input_dropout(self.input_linear(vector_set)) 
 
@@ -49,6 +107,31 @@ class ARMSTD(nn.Module):
         return logits
 
     def generate(self, vector_set, return_probs=False, device="cpu"):
+        """
+        Autoregressively generates a sequence of manufacturing steps given input vectors.
+
+        Starts with a START token and generates one token at a time until a STOP token
+        is produced or the maximum sequence length is reached.
+
+        Parameters
+        ----------
+        vector_set : torch.Tensor
+            Input tensor of shape (batch_size, set_size, input_dim), representing feature vectors.
+        return_probs : bool, optional
+            If True, returns softmax probabilities for each step (default: False).
+        device : str, optional
+            Device to perform computation on (e.g., 'cpu' or 'cuda').
+
+        Returns
+        -------
+        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+            If return_probs is False:
+                Generated token sequences of shape (batch_size, max_seq_len)
+            If return_probs is True:
+                Tuple of:
+                    - Generated sequences (batch_size, max_seq_len)
+                    - Softmax probabilities (batch_size, max_seq_len, num_steps)
+        """
         batch_size = vector_set.size(0)
         vector_set = vector_set.to(device)
         memory = self.input_linear(vector_set) 
@@ -96,6 +179,7 @@ class ARMSTD(nn.Module):
     
     def train_model():
         pass  
+
 
 if __name__ == "__main__":
     batch_size = 1
