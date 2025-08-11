@@ -1,0 +1,22 @@
+**__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+
+outputs/*
+mlruns/*
+reports/*
+
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# Python virtual environments
+.venv/
+
+# mac files
+*.DS_Store
+
+#checkpoints
+*.pth
