@@ -1,0 +1,36 @@
+# ============================================================
+# Konfiguration: Prozesszeit-Regression (process-time-regression)
+# Erbt von config/base.yaml, überschreibt task-spezifische Werte.
+# ============================================================
+
+mlflow:
+  experiment_name: "process-time-regression"
+  tuning_experiment_name: "process-time-regression-hyperparameter-tuning"
+
+data:
+  target_type: "time"
+
+training:
+  tuning_epochs: 20
+  final_epochs: 1000
+
+checkpoint:
+  tuning_subdir: "tuning/time-regression"
+  best_subdir: "best_model/time-regression"
+  filename: "time-regressor-{epoch:02d}-{val_loss:.4f}"
+
+hyperparameter_search:
+  dropout:
+    low: 0.2
+    high: 0.5
+  lr:
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  num_layers:
+    low: 2
+    high: 6
+  embed_dim:
+    low: 64
+    high: 256
+    step: 32

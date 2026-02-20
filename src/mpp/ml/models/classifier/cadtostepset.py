@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 # custom imports
 from mpp.constants import VOCAB
-from src.mpp.ml.models.classifier.multilabel_classifier import MultilabelTransformerEncoderModule
+from mpp.ml.models.classifier.multilabel_classifier import MultilabelTransformerEncoderModule
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)8s - %(message)s",

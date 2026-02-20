@@ -8,7 +8,7 @@ import torch.nn as nn
 
 #custom imports
 from mpp.constants import VOCAB
-from mpp.ml.models.decoder.vecset_transformer import ARMSTD
+from mpp.ml.models.sequence.vecset_transformer import ARMSTD
 from mpp.ml.metrics.sequences import Sequence_comparator
 
 class ARMSTM(pl.LightningModule):
