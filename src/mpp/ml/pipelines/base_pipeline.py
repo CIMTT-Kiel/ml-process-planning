@@ -28,7 +28,7 @@ from pytorch_lightning.loggers import MLFlowLogger
 from mpp.constants import PATHS
 from mpp.ml.datasets.fabricad_datamodule import Fabricad_datamodule
 
-_BASE_CONFIG_PATH = Path(__file__).parents[4] / "config" / "base.yaml"
+_BASE_CONFIG_PATH = PATHS.CONFIG / "base.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +103,7 @@ def build_mlflow_logger(
     cfg: dict,
     experiment_name: str,
     run_name: str | None = None,
+    run_id: str | None = None,
 ) -> MLFlowLogger:
     """Erstelle einen MLFlowLogger mit der konfigurierten Tracking-URI.
 
@@ -114,6 +115,9 @@ def build_mlflow_logger(
         Name des MLflow-Experiments.
     run_name:
         Optionaler Name des MLflow-Runs.
+    run_id:
+        Optionale Run-ID eines bereits gestarteten MLflow-Runs (z. B. für
+        Nested Runs).
 
     Returns
     -------
@@ -123,6 +127,7 @@ def build_mlflow_logger(
         experiment_name=experiment_name,
         tracking_uri=cfg["mlflow"]["tracking_uri"],
         run_name=run_name,
+        run_id=run_id,
     )
 
 
@@ -206,6 +211,7 @@ def build_trainer(
         enable_model_summary=False,
         log_every_n_steps=cfg["training"]["log_every_n_steps"],
         callbacks=callbacks,
+        devices=1
     )
 
 

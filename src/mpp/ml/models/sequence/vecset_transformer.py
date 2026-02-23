@@ -93,14 +93,14 @@ class ARMSTD(nn.Module):
         memory = self.input_dropout(self.input_linear(vector_set)) 
 
         tgt_embedded = self.embedding_dropout(self.step_embeddings(tgt_seq))
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_embedded.size(1)).to(vector_set.device)
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_embedded.size(1)).to(vector_set.device).bool()
         tgt_key_padding_mask = tgt_seq == VOCAB["PAD"]
 
         output = self.decoder(
             tgt=tgt_embedded,
             memory=memory,
             tgt_mask=tgt_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask
+            tgt_key_padding_mask=tgt_key_padding_mask,
         )
 
         logits = self.output_linear(output)

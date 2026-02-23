@@ -60,7 +60,7 @@ class Fabricad(Dataset):
         assert self.input_type in ["vecset"], ValueError(f"Not supported input type: {self.input_type}")
 
         # check if a split file exists, if not create one
-        split_file = PATHS.FEATURE_DATA / "sample_split.json"
+        split_file = PATHS.CONFIG/ "sample_split.json"
 
         if not split_file.exists():
             self.split()
@@ -117,7 +117,7 @@ class Fabricad(Dataset):
             "test": test_samples
         }
         #save split dictionary to json file
-        with open(PATHS.FEATURE_DATA / "sample_split.json", "w") as f:
+        with open(PATHS.CONFIG/ "sample_split.json", "w") as f:
             json.dump(split_dict, f, indent=4)
 
         logger.info(f"Split dataset into {len(train_samples)} train, {len(valid_samples)} validation and {len(test_samples)} test samples.")
@@ -253,8 +253,9 @@ class Fabricad(Dataset):
             - Tensor (for step-set or sequence)
         """
         # load plan
-        plan_item = pd.read_json(PATHS.FEATURE_DATA / self.samples[idx] / 'production_plan/production_plan.json')
+        plan_item = pd.read_csv(PATHS.FEATURE_DATA / self.samples[idx] / 'plan.csv', sep=';')
         steps = plan_item["Schritt"].tolist()[1:]
+        steps.remove("liefern")
 
         #calculate target item
         match self.target_type:

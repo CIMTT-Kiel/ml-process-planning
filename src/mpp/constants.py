@@ -33,7 +33,7 @@ _path_dict = {
     "ROOT":           _ROOT,
     "REPORT":         _ROOT / "reports",
     "REPORT_FIGURES": _ROOT / "reports/figures",
-    "CONFIG":         _ROOT / "config",
+    "CONFIG":         _ROOT / "src/mpp/config",
 
     "CKPT_DIR":       _ROOT / "src/mpp/ml/models/checkpoints",
     "MODEL_DIR":      _ROOT / "models",
@@ -41,7 +41,7 @@ _path_dict = {
     # Datenpfade: über Umgebungsvariablen konfigurierbar
     # Beispiel: export MPP_PP_DATA=/data/fabricad
     "PP_DATA":      Path(os.environ.get("MPP_PP_DATA", "/home/coder/shared/datasets/fabricad/fabricad-100k")),
-    "FEATURE_DATA": Path(os.environ.get("MPP_FEATURE_DATA", "/data/feature")),
+    "FEATURE_DATA": Path(os.environ.get("MPP_FEATURE_DATA", "/home/coder/shared/datasets/fabricad/fabricad-100k")),
 }
 
 # -------------------------------

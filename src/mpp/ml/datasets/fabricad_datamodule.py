@@ -75,7 +75,7 @@ class Fabricad_datamodule(pl.LightningDataModule):
         - "class": for single-label classification
         - Others as defined in the Fabricad dataset.
     """
-    def __init__(self, batch_size=32, num_workers=4, input_type="vecset", target_type="seq"):
+    def __init__(self, batch_size=32, num_workers=0, input_type="vecset", target_type="seq"):
         super().__init__()
         logger.info("Initializing Fabricad datamodule")
         self.batch_size = batch_size
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     
     for input_type in ["vecset"]:
         for target_type in ["time", "cost", "step-set", "seq"]:
-            vecset_data_module = Fabricad_datamodule(batch_size=32, num_workers=4, input_type=input_type, target_type=target_type)
+            vecset_data_module = Fabricad_datamodule(batch_size=32, num_workers=0, input_type=input_type, target_type=target_type)
             vecset_data_module.setup(stage="fit")
             
             train_loader = vecset_data_module.train_dataloader()

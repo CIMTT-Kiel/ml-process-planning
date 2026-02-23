@@ -101,12 +101,10 @@ class ARMSTM(pl.LightningModule):
         """
         vector_set, padded_targets = batch
 
-        decoder_input = torch.full((padded_targets.size(0), 1), VOCAB["START"], dtype=torch.long).to(padded_targets.device)
-        decoder_input = torch.cat([decoder_input, padded_targets[:, :-1]], dim=1).to(padded_targets.device)
-
+        decoder_input = padded_targets[:, :-1]  # [START, step1, ..., STOP] – letztes Token weg
         logits = self(vector_set, decoder_input)
 
-        loss = self.criterion(logits.view(-1,VOCAB.__len__()), padded_targets.view(-1))
+        loss = self.criterion(logits.view(-1, VOCAB.__len__()), padded_targets[:, 1:].reshape(-1))
 
         self.log("train_loss", loss)
 
@@ -145,17 +143,17 @@ class ARMSTM(pl.LightningModule):
         """
         vector_set, padded_targets = batch
 
-        decoder_input = torch.full((padded_targets.size(0), 1), VOCAB["START"], dtype=torch.long).to(padded_targets.device)
-        decoder_input = torch.cat([decoder_input, padded_targets[:, :-1]], dim=1).to(padded_targets.device)
-
+        decoder_input = padded_targets[:, :-1]  # [START, step1, ..., STOP] – letztes Token weg
         logits = self(vector_set, decoder_input)
 
+        targets_shifted = padded_targets[:, 1:]  # [step1, ..., STOP, PAD, ...] – START weg
+
         preds = logits.argmax(dim=-1)
-        mask = padded_targets != VOCAB["PAD"]
-        acc = ((preds == padded_targets) & mask).sum().float() / mask.sum()
+        mask = targets_shifted != VOCAB["PAD"]
+        acc = ((preds == targets_shifted) & mask).sum().float() / mask.sum()
         self.log("val_acc", acc, prog_bar=True)
 
-        val_loss = self.criterion(logits.view(-1,VOCAB.__len__()), padded_targets.view(-1))
+        val_loss = self.criterion(logits.view(-1, VOCAB.__len__()), targets_shifted.reshape(-1))
 
         self.log("val_loss", val_loss, prog_bar=True)
 
@@ -163,7 +161,7 @@ class ARMSTM(pl.LightningModule):
 
         if batch_idx % 2 == 0:
             # Calculate additional sequence metrics
-            s_metrics = self.comparator.compare(preds, padded_targets)
+            s_metrics = self.comparator.compare(preds, targets_shifted)
 
             self.log("val_elementwise_accuracy", s_metrics["elementwise_accuracy"].mean(), prog_bar=True)
             self.log("val_shifted_accurracy", s_metrics["shifted_accuracy"].mean(), prog_bar=True)

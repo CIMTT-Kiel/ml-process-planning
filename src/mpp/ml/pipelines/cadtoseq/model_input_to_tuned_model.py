@@ -19,8 +19,10 @@ Ausführung
 from pathlib import Path
 
 import mlflow
+import torch
 
 from mpp.ml.models.sequence.cadtoseq_module import ARMSTM
+from mpp.constants import PATHS
 from mpp.ml.pipelines.base_pipeline import (
     build_callbacks,
     build_mlflow_logger,
@@ -31,7 +33,7 @@ from mpp.ml.pipelines.base_pipeline import (
     suggest_hyperparams,
 )
 
-_CFG_PATH = Path(__file__).parents[4] / "config" / "cadtoseq.yaml"
+_CFG_PATH = PATHS.CONFIG / "cadtoseq.yaml"
 cfg = load_config(_CFG_PATH)
 
 
@@ -44,6 +46,7 @@ def main():
     def objective(trial):
         hp = suggest_hyperparams(trial, cfg["hyperparameter_search"])
         max_epochs = cfg["training"]["tuning_epochs"]
+        torch.set_float32_matmul_precision('medium')
 
         model = ARMSTM(
             lr=hp["lr"],
@@ -55,29 +58,37 @@ def main():
             max_epochs=max_epochs,
         )
 
-        mlf_logger = build_mlflow_logger(cfg, cfg["mlflow"]["tuning_experiment_name"])
-        callbacks = build_callbacks(
-            cfg,
-            cfg["checkpoint"]["tuning_subdir"],
-            cfg["checkpoint"]["filename"],
-            patience=cfg["training"]["tuning_patience"],
-        )
-        trainer = build_trainer(cfg, max_epochs, mlf_logger, callbacks)
-        trainer.fit(model, train_loader, val_loader)
+        with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True) as child_run:
+            mlf_logger = build_mlflow_logger(
+                cfg,
+                cfg["mlflow"]["tuning_experiment_name"],
+                run_id=child_run.info.run_id,
+            )
+            callbacks = build_callbacks(
+                cfg,
+                cfg["checkpoint"]["tuning_subdir"],
+                cfg["checkpoint"]["filename"],
+                patience=cfg["training"]["tuning_patience"],
+            )
+            trainer = build_trainer(cfg, max_epochs, mlf_logger, callbacks)
+            trainer.fit(model, train_loader, val_loader)
 
-        val_loss = trainer.callback_metrics["val_loss"].item()
-        mlf_logger.log_hyperparams(trial.params)
-        mlf_logger.log_metrics({"val_loss": val_loss})
+            val_loss = trainer.callback_metrics["val_loss"].item()
+            mlf_logger.log_hyperparams(trial.params)
+            mlf_logger.log_metrics({"val_loss": val_loss})
+
         return val_loss
 
     mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
-    mlflow.set_experiment(cfg["mlflow"]["experiment_name"])
-    study = run_tuning(cfg, objective)
+    mlflow.set_experiment(cfg["mlflow"]["tuning_experiment_name"])
+    with mlflow.start_run(run_name="optuna-study"):
+        study = run_tuning(cfg, objective)
 
     # ------------------------------------------------------------------
     # Finales Training mit besten Hyperparametern
     # ------------------------------------------------------------------
     best = study.best_trial.params
+    torch.set_float32_matmul_precision('high')
 
     model = ARMSTM(
         lr=best["lr"],

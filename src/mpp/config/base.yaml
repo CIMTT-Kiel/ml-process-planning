@@ -4,11 +4,11 @@
 # ============================================================
 
 mlflow:
-  tracking_uri: "https://cimtt-ki.haw-kiel.de/mlflow/"
+  tracking_uri: "http://mlflow-server:5000"
 
 data:
-  batch_size: 85
-  num_workers: 4
+  batch_size: 200
+  num_workers: 0
   input_type: "vecset"
   # target_type wird in der jeweiligen Task-Config gesetzt
 
