@@ -11,8 +11,10 @@ data:
   target_type: "seq"
 
 training:
-  tuning_epochs: 50
+  tuning_epochs: 35      # Mit patience=8 reichen ~17 Epochen bis Early Stop → Puffer für langsame Trials
   final_epochs: 1000
+  tuning_patience: 8     # Schnellerer Exit; spart ~20% Zeit pro Trial ggü. patience=10
+  plot_every_n_epochs: 1
 
 checkpoint:
   tuning_subdir: "tuning/cadtoseq"
@@ -21,7 +23,7 @@ checkpoint:
 
 hyperparameter_search:
   dropout:
-    low: 0.2
+    low: 0.1
     high: 0.5
   lr:
     low: 1.0e-5
@@ -30,9 +32,9 @@ hyperparameter_search:
   nhead:
     choices: [4, 8]
   num_layers:
-    low: 4
-    high: 8
+    low: 2      # Für max. 6 Schritte aus 10 Token reichen 2 Layer
+    high: 6     # Mehr als 6 Layer bringt kaum Mehrwert, kostet aber Zeit
   embed_dim:
-    low: 64
+    low: 128    # Minimum 128: bei nhead=8 → head_dim=16 (Flash Attention-Minimum)
     high: 256
     step: 32

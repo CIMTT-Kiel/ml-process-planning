@@ -7,13 +7,13 @@ mlflow:
   tracking_uri: "http://mlflow-server:5000"
 
 data:
-  batch_size: 200
+  batch_size: 800
   num_workers: 0
   input_type: "vecset"
   # target_type wird in der jeweiligen Task-Config gesetzt
 
 training:
-  n_trials: 20          # Anzahl Optuna-Trials für Hyperparameter-Tuning
+  n_trials: 35          # Anzahl Optuna-Trials für Hyperparameter-Tuning
   tuning_epochs: 50     # Max. Epochen pro Tuning-Trial
   final_epochs: 1000    # Max. Epochen für das finale Best-Model Training
   tuning_patience: 10   # EarlyStopping-Patience beim Tuning

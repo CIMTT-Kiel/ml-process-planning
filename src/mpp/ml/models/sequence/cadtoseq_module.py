@@ -1,10 +1,13 @@
 #standard library imports
+import logging
 
 # third party imports
 import torch
 import pytorch_lightning as pl
 import torch.nn.functional as F
 import torch.nn as nn
+import mlflow
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 #custom imports
 from mpp.constants import VOCAB
@@ -173,6 +176,40 @@ class ARMSTM(pl.LightningModule):
         self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'])
 
         
+    def on_train_start(self):
+        """Loggt den tatsächlichen Flash-Attention-Status als MLflow-Tag."""
+        device = next(self.parameters()).device
+        precision = self.trainer.precision  # z.B. "bf16-mixed", "32"
+
+        on_cuda = device.type == "cuda"
+        is_low_precision = any(p in str(precision) for p in ("16", "bf16"))
+
+        # Prüfen ob Flash Attention tatsächlich läuft: kleinen Dummy-Forward erzwingen
+        flash_active = False
+        if on_cuda and is_low_precision:
+            try:
+                # SDPA erwartet (batch, heads, seq_len, head_dim)
+                nhead = self.hparams.nhead
+                head_dim = self.hparams.embed_dim // nhead
+                dummy = torch.randn(1, nhead, 4, head_dim, device=device, dtype=torch.bfloat16)
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    torch.nn.functional.scaled_dot_product_attention(dummy, dummy, dummy)
+                flash_active = True
+            except Exception:
+                flash_active = False
+
+        mlflow.log_params({
+            "flash_attention_active": flash_active,
+            "training_device": str(device),
+            "training_precision": str(precision),
+            "batch_size": self.trainer.train_dataloader.batch_size,
+        })
+
+        status = "AKTIV" if flash_active else "INAKTIV"
+        logging.getLogger(__name__).info(
+            f"Flash Attention: {status}  (device={device}, precision={precision})"
+        )
+
     def configure_optimizers(self):
         """
         Configures the optimizer and learning rate scheduler.

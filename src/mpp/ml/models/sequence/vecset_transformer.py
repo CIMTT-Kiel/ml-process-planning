@@ -1,5 +1,6 @@
 #standard imports
 import logging
+import math
 
 #third party imports
 import torch
@@ -20,6 +21,24 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 formatter = logging.Formatter("%(asctime)s %(levelname)8s - %(message)s")
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding (Vaswani et al., 2017)."""
+
+    def __init__(self, embed_dim: int, max_len: int = 512):
+        super().__init__()
+        pe = torch.zeros(max_len, embed_dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.pe[:, : x.size(1), :]
 
 
 class ARMSTD(nn.Module):
@@ -55,11 +74,12 @@ class ARMSTD(nn.Module):
         self.input_linear = nn.Linear(input_dim, embed_dim)
 
         decoder_layer = nn.TransformerDecoderLayer(
-            d_model=embed_dim, nhead=nhead, dim_feedforward=512, batch_first=True, dropout=dropout, 
+            d_model=embed_dim, nhead=nhead, dim_feedforward=4 * embed_dim, batch_first=True, dropout=dropout,
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
         self.step_embeddings = nn.Embedding(num_steps, embed_dim)
+        self.pos_encoder = PositionalEncoding(embed_dim)
         self.output_linear = nn.Linear(embed_dim, num_steps)
 
         self.max_seq_len = max_seq_len
@@ -92,14 +112,17 @@ class ARMSTD(nn.Module):
         batch_size = vector_set.size(0)
         memory = self.input_dropout(self.input_linear(vector_set)) 
 
-        tgt_embedded = self.embedding_dropout(self.step_embeddings(tgt_seq))
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_embedded.size(1)).to(vector_set.device).bool()
+        tgt_embedded = self.pos_encoder(self.embedding_dropout(self.step_embeddings(tgt_seq)))
         tgt_key_padding_mask = tgt_seq == VOCAB["PAD"]
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+            tgt_embedded.size(1), device=vector_set.device
+        ).bool()
 
         output = self.decoder(
             tgt=tgt_embedded,
             memory=memory,
             tgt_mask=tgt_mask,
+            tgt_is_causal=True,
             tgt_key_padding_mask=tgt_key_padding_mask,
         )
 
@@ -141,14 +164,16 @@ class ARMSTD(nn.Module):
         all_probs = []
 
         for _ in range(self.max_seq_len):
-            tgt_embedded = self.step_embeddings(generated)
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_embedded.size(1)).to(device)
+            tgt_embedded = self.pos_encoder(self.step_embeddings(generated))
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+                tgt_embedded.size(1), device=device
+            ).bool()
 
             output = self.decoder(
                 tgt=tgt_embedded,
                 memory=memory,
-                tgt_mask=tgt_mask
-
+                tgt_mask=tgt_mask,
+                tgt_is_causal=True,
             )
 
             logits = self.output_linear(output[:, -1, :])

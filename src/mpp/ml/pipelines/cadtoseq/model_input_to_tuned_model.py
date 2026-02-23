@@ -21,6 +21,7 @@ from pathlib import Path
 import mlflow
 import torch
 
+from mpp.ml.callbacks.artifact_callbacks import BestModelPlotCallback, SequencePredictionPlotCallback
 from mpp.ml.models.sequence.cadtoseq_module import ARMSTM
 from mpp.constants import PATHS
 from mpp.ml.pipelines.base_pipeline import (
@@ -70,6 +71,10 @@ def main():
                 cfg["checkpoint"]["filename"],
                 patience=cfg["training"]["tuning_patience"],
             )
+            callbacks.append(SequencePredictionPlotCallback(
+                plot_every_n_epochs=cfg["training"]["plot_every_n_epochs"],
+            ))
+            callbacks.append(BestModelPlotCallback())
             trainer = build_trainer(cfg, max_epochs, mlf_logger, callbacks)
             trainer.fit(model, train_loader, val_loader)
 
@@ -109,6 +114,10 @@ def main():
         cfg["checkpoint"]["filename"],
         patience=cfg["training"]["final_patience"],
     )
+    callbacks.append(SequencePredictionPlotCallback(
+        plot_every_n_epochs=cfg["training"]["plot_every_n_epochs"],
+    ))
+    callbacks.append(BestModelPlotCallback())
     trainer = build_trainer(cfg, cfg["training"]["final_epochs"], mlf_logger, callbacks)
     trainer.fit(model, train_loader, val_loader)
 

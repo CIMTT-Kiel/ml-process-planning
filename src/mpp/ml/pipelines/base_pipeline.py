@@ -26,6 +26,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import MLFlowLogger
 
 from mpp.constants import PATHS
+from mpp.ml.callbacks.artifact_callbacks import MLflowCheckpointCallback
 from mpp.ml.datasets.fabricad_datamodule import Fabricad_datamodule
 
 _BASE_CONFIG_PATH = PATHS.CONFIG / "base.yaml"
@@ -174,7 +175,7 @@ def build_callbacks(
         save_weights_only=False,
         verbose=True,
     )
-    return [early_stop, checkpoint]
+    return [early_stop, checkpoint, MLflowCheckpointCallback()]
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +207,7 @@ def build_trainer(
     """
     return Trainer(
         max_epochs=max_epochs,
+        precision="bf16-mixed",
         logger=logger,
         enable_checkpointing=True,
         enable_model_summary=False,
