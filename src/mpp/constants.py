@@ -40,7 +40,7 @@ _path_dict = {
 
     # Datenpfade: über Umgebungsvariablen konfigurierbar
     # Beispiel: export MPP_PP_DATA=/data/fabricad
-    "PP_DATA":      Path(os.environ.get("MPP_PP_DATA", "/data/fabricad")),
+    "PP_DATA":      Path(os.environ.get("MPP_PP_DATA", "/home/coder/shared/datasets/fabricad/fabricad-100k")),
     "FEATURE_DATA": Path(os.environ.get("MPP_FEATURE_DATA", "/data/feature")),
 }
 
