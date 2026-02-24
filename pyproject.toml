@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mpp"
-version = "0.1.0"
+version = "1.0.0"
 description = "mpp"
 authors = [{ name = "Kruse Michel", email = "michel.kruse@fh-kiel.de" }]
 requires-python = ">=3.10"
