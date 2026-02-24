@@ -9,6 +9,8 @@ outputs/*
 mlruns/*
 reports/*
 
+# checkpoints
+*.ckpt
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/

@@ -1,0 +1,39 @@
+# ============================================================
+# Konfiguration: Prozessschritt-Klassifikation (cadtostepset)
+# Erbt von config/base.yaml, überschreibt task-spezifische Werte.
+# ============================================================
+
+mlflow:
+  experiment_name: "cadtostepset"
+  tuning_experiment_name: "cadtostepset-hyperparameter-tuning"
+
+data:
+  target_type: "step-set"
+
+training:
+  gpu_id: 0             # GPU-Index (0 oder 1)
+  tuning_epochs: 50
+  final_epochs: 1000
+  tuning_patience: 5     # Deutlich unter tuning_epochs, damit Early Stop greifen kann
+  plot_every_n_epochs: 5
+
+checkpoint:
+  tuning_subdir: "tuning/cadtostepset"
+  best_subdir: "best_model/cadtostepset"
+  filename: "cadtostepset-{epoch:02d}-{val_loss:.4f}"
+
+hyperparameter_search:
+  dropout:
+    low: 0.2
+    high: 0.5
+  lr:
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  num_layers:
+    low: 2
+    high: 4     # 7-Klassen-Classifier braucht keine tiefen Encoder
+  embed_dim:
+    low: 128    # Minimum 128: ausreichend Kapazität für 1024 Eingabevektoren
+    high: 256
+    step: 32

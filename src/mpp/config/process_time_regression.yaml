@@ -1,0 +1,39 @@
+# ============================================================
+# Konfiguration: Prozesszeit-Regression (process-time-regression)
+# Erbt von config/base.yaml, überschreibt task-spezifische Werte.
+# ============================================================
+
+mlflow:
+  experiment_name: "process-time-regression"
+  tuning_experiment_name: "process-time-regression-hyperparameter-tuning"
+
+data:
+  target_type: "time"
+
+training:
+  gpu_id: 1             # GPU-Index (0 oder 1)
+  tuning_epochs: 20
+  final_epochs: 1000
+  tuning_patience: 5     # Deutlich unter tuning_epochs, damit Early Stop greifen kann
+  plot_every_n_epochs: 5
+
+checkpoint:
+  tuning_subdir: "tuning/time-regression"
+  best_subdir: "best_model/time-regression"
+  filename: "time-regressor-{epoch:02d}-{val_loss:.4f}"
+
+hyperparameter_search:
+  dropout:
+    low: 0.0
+    high: 0.3    # Regression profitiert von weniger Dropout als Klassifikation
+  lr:
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  num_layers:
+    low: 2
+    high: 4     # Skalar-Regression braucht keinen tiefen Encoder
+  embed_dim:
+    low: 128    # Minimum 128: ausreichend Kapazität für 1024 Eingabevektoren
+    high: 256
+    step: 64    # step=64 stellt sicher dass head_dim % 8 == 0 (num_heads=8 fix)

@@ -1,14 +1,17 @@
 #standard library imports
+import logging
 
 # third party imports
 import torch
 import pytorch_lightning as pl
 import torch.nn.functional as F
 import torch.nn as nn
+import mlflow
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 #custom imports
 from mpp.constants import VOCAB
-from mpp.ml.models.decoder.vecset_transformer import ARMSTD
+from mpp.ml.models.sequence.vecset_transformer import ARMSTD
 from mpp.ml.metrics.sequences import Sequence_comparator
 
 class ARMSTM(pl.LightningModule):
@@ -41,11 +44,12 @@ class ARMSTM(pl.LightningModule):
         Maximum number of epochs for training (default: 100).
     """
 
-    def __init__(self, lr=0.00003, embed_dim=128, nhead=4, num_layers = 3, dropout=0.3,  weight_decay=0.01, max_epochs=100):
+    def __init__(self, lr=0.00003, embed_dim=128, nhead=4, num_layers = 3, dropout=0.3,  weight_decay=0.01, max_epochs=100, use_scheduler=True):
         super().__init__()
         self.lr = lr
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
+        self.use_scheduler = use_scheduler
 
         #model spezific
         self.embed_dim = embed_dim
@@ -101,12 +105,10 @@ class ARMSTM(pl.LightningModule):
         """
         vector_set, padded_targets = batch
 
-        decoder_input = torch.full((padded_targets.size(0), 1), VOCAB["START"], dtype=torch.long).to(padded_targets.device)
-        decoder_input = torch.cat([decoder_input, padded_targets[:, :-1]], dim=1).to(padded_targets.device)
-
+        decoder_input = padded_targets[:, :-1]  # [START, step1, ..., STOP] – letztes Token weg
         logits = self(vector_set, decoder_input)
 
-        loss = self.criterion(logits.view(-1,VOCAB.__len__()), padded_targets.view(-1))
+        loss = self.criterion(logits.view(-1, VOCAB.__len__()), padded_targets[:, 1:].reshape(-1))
 
         self.log("train_loss", loss)
 
@@ -145,17 +147,17 @@ class ARMSTM(pl.LightningModule):
         """
         vector_set, padded_targets = batch
 
-        decoder_input = torch.full((padded_targets.size(0), 1), VOCAB["START"], dtype=torch.long).to(padded_targets.device)
-        decoder_input = torch.cat([decoder_input, padded_targets[:, :-1]], dim=1).to(padded_targets.device)
-
+        decoder_input = padded_targets[:, :-1]  # [START, step1, ..., STOP] – letztes Token weg
         logits = self(vector_set, decoder_input)
 
+        targets_shifted = padded_targets[:, 1:]  # [step1, ..., STOP, PAD, ...] – START weg
+
         preds = logits.argmax(dim=-1)
-        mask = padded_targets != VOCAB["PAD"]
-        acc = ((preds == padded_targets) & mask).sum().float() / mask.sum()
+        mask = targets_shifted != VOCAB["PAD"]
+        acc = ((preds == targets_shifted) & mask).sum().float() / mask.sum()
         self.log("val_acc", acc, prog_bar=True)
 
-        val_loss = self.criterion(logits.view(-1,VOCAB.__len__()), padded_targets.view(-1))
+        val_loss = self.criterion(logits.view(-1, VOCAB.__len__()), targets_shifted.reshape(-1))
 
         self.log("val_loss", val_loss, prog_bar=True)
 
@@ -163,7 +165,7 @@ class ARMSTM(pl.LightningModule):
 
         if batch_idx % 2 == 0:
             # Calculate additional sequence metrics
-            s_metrics = self.comparator.compare(preds, padded_targets)
+            s_metrics = self.comparator.compare(preds, targets_shifted)
 
             self.log("val_elementwise_accuracy", s_metrics["elementwise_accuracy"].mean(), prog_bar=True)
             self.log("val_shifted_accurracy", s_metrics["shifted_accuracy"].mean(), prog_bar=True)
@@ -175,6 +177,40 @@ class ARMSTM(pl.LightningModule):
         self.log("lr", self.trainer.optimizers[0].param_groups[0]['lr'])
 
         
+    def on_train_start(self):
+        """Loggt den tatsächlichen Flash-Attention-Status als MLflow-Tag."""
+        device = next(self.parameters()).device
+        precision = self.trainer.precision  # z.B. "bf16-mixed", "32"
+
+        on_cuda = device.type == "cuda"
+        is_low_precision = any(p in str(precision) for p in ("16", "bf16"))
+
+        # Prüfen ob Flash Attention tatsächlich läuft: kleinen Dummy-Forward erzwingen
+        flash_active = False
+        if on_cuda and is_low_precision:
+            try:
+                # SDPA erwartet (batch, heads, seq_len, head_dim)
+                nhead = self.hparams.nhead
+                head_dim = self.hparams.embed_dim // nhead
+                dummy = torch.randn(1, nhead, 4, head_dim, device=device, dtype=torch.bfloat16)
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    torch.nn.functional.scaled_dot_product_attention(dummy, dummy, dummy)
+                flash_active = True
+            except Exception:
+                flash_active = False
+
+        mlflow.log_params({
+            "flash_attention_active": flash_active,
+            "training_device": str(device),
+            "training_precision": str(precision),
+            "batch_size": self.trainer.train_dataloader.batch_size,
+        })
+
+        status = "AKTIV" if flash_active else "INAKTIV"
+        logging.getLogger(__name__).info(
+            f"Flash Attention: {status}  (device={device}, precision={precision})"
+        )
+
     def configure_optimizers(self):
         """
         Configures the optimizer and learning rate scheduler.
@@ -191,17 +227,16 @@ class ARMSTM(pl.LightningModule):
             weight_decay=self.hparams.weight_decay  
         )
 
-        # Cosine Annealing Scheduler
+        if not self.use_scheduler:
+            return optimizer
+
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=200,  # max epochs for one cycle
-            eta_min=0.000001  # min learning rate to reach
+            T_max=self.hparams.max_epochs,
+            eta_min=1e-6,
         )
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "train_loss" 
-            }
+            "lr_scheduler": {"scheduler": scheduler},
         }
