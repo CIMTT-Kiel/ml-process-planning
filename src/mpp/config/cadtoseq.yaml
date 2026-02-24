@@ -11,6 +11,7 @@ data:
   target_type: "seq"
 
 training:
+  gpu_id: 0             # GPU-Index (0 oder 1)
   tuning_epochs: 35      # Mit patience=8 reichen ~17 Epochen bis Early Stop → Puffer für langsame Trials
   final_epochs: 1000
   tuning_patience: 8     # Schnellerer Exit; spart ~20% Zeit pro Trial ggü. patience=10
@@ -37,4 +38,4 @@ hyperparameter_search:
   embed_dim:
     low: 128    # Minimum 128: bei nhead=8 → head_dim=16 (Flash Attention-Minimum)
     high: 256
-    step: 32
+    step: 64    # step=64 stellt sicher dass head_dim % 8 == 0 für alle nhead-Werte

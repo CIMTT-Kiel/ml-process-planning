@@ -11,8 +11,11 @@ data:
   target_type: "step-set"
 
 training:
-  tuning_epochs: 20
+  gpu_id: 0             # GPU-Index (0 oder 1)
+  tuning_epochs: 50
   final_epochs: 1000
+  tuning_patience: 5     # Deutlich unter tuning_epochs, damit Early Stop greifen kann
+  plot_every_n_epochs: 5
 
 checkpoint:
   tuning_subdir: "tuning/cadtostepset"
@@ -29,8 +32,8 @@ hyperparameter_search:
     log: true
   num_layers:
     low: 2
-    high: 6
+    high: 4     # 7-Klassen-Classifier braucht keine tiefen Encoder
   embed_dim:
-    low: 64
+    low: 128    # Minimum 128: ausreichend Kapazität für 1024 Eingabevektoren
     high: 256
     step: 32

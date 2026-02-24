@@ -1,18 +1,9 @@
-# standard imports
 import logging
 
-# third party imports
 import torch
 import torch.nn as nn
 
-# custom imports
 from mpp.constants import VOCAB
-
-logging.basicConfig(
-    format="%(asctime)s %(levelname)8s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +90,6 @@ class MultilabelTransformerEncoderModule(nn.Module):
         return (probs > self.threshold).long()
 
 
-# ---------------------------------------------------------------------------
-# Schnelltest
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     batch_size = 16
     vector_set = torch.randn(batch_size, 1024, 32)

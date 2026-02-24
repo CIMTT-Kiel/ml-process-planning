@@ -1,12 +1,14 @@
 """
 MLflow Artifact Callbacks
 --------------------------
-MLflowCheckpointCallback      – Loggt den besten Checkpoint als MLflow-Artefakt.
-SequencePredictionPlotCallback – Loggt Diagnose-Plots alle N Validierungs-Epochen
-                                  (mit Epoch-Nummer im Dateinamen).
-BestModelPlotCallback          – Loggt Plots für das aktuell beste Modell;
-                                  Dateien werden immer überschrieben wenn ein
-                                  besseres Ergebnis erzielt wurde.
+MLflowCheckpointCallback        – Loggt den besten Checkpoint als MLflow-Artefakt.
+SequencePredictionPlotCallback   – Loggt Diagnose-Plots alle N Validierungs-Epochen
+                                   (mit Epoch-Nummer im Dateinamen).
+BestModelPlotCallback            – Loggt Plots für das aktuell beste Modell;
+                                   Dateien werden immer überschrieben wenn ein
+                                   besseres Ergebnis erzielt wurde.
+RegressionPredictionPlotCallback – Loggt Regressions-Diagnose-Plots alle N Epochen.
+BestRegressionModelPlotCallback  – Loggt Regressions-Plots für das aktuell beste Modell.
 
 Artefakt-Struktur (cadtoseq):
   checkpoints/        – Beste Modell-Checkpoints
@@ -15,6 +17,19 @@ Artefakt-Struktur (cadtoseq):
   plots/levenshtein/  – Levenshtein-Distanzverteilung (epochenweise)
   plots/token_acc/    – Token-wise Accuracy (epochenweise)
   plots/best/         – Alle vier Plots für das aktuell beste Modell (wird überschrieben)
+
+Artefakt-Struktur (process-time-regression):
+  checkpoints/        – Beste Modell-Checkpoints
+  plots/scatter/      – Vorhergesagt vs. tatsächlich (epochenweise)
+  plots/residuals/    – Residuen-Plot (epochenweise)
+  plots/errors/       – Fehlerverteilung (epochenweise)
+  plots/best/         – Alle drei Plots für das aktuell beste Modell (wird überschrieben)
+
+Artefakt-Struktur (cadtostepset):
+  checkpoints/        – Beste Modell-Checkpoints
+  plots/examples/     – Vorhersage-Tabelle (epochenweise)
+  plots/class_metrics/– Precision/Recall pro Prozessschritt (epochenweise)
+  plots/best/         – Beide Plots für das aktuell beste Modell (wird überschrieben)
 """
 
 import logging
@@ -34,6 +49,10 @@ from mpp.constants import INV_VOCAB, VOCAB
 from mpp.ml.metrics.sequences import Sequence_comparator
 
 logger = logging.getLogger(__name__)
+
+# Prozessschritt-Labels (ohne START, STOP, PAD), in Reihenfolge der Token-IDs
+_SPECIAL_TOKENS = {"START", "STOP", "PAD"}
+STEP_LABELS = [INV_VOCAB[i] for i in range(len(VOCAB)) if INV_VOCAB[i] not in _SPECIAL_TOKENS]
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +351,424 @@ class BestModelPlotCallback(_SequencePlotMixin, Callback):
 
         self._generate_plots(
             tf_preds, gen_preds, targets,
+            title_prefix=f"Bestes Modell – Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots/best",
+            filename_prefix="",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression: gemeinsame Basis-Klasse mit Plot-Logik
+# ---------------------------------------------------------------------------
+
+class _RegressionPlotMixin:
+    """
+    Mixin mit geteilter Prediction-Collection und Plot-Logik für Regressionsmodelle.
+    Wird von RegressionPredictionPlotCallback und BestRegressionModelPlotCallback genutzt.
+    """
+
+    # ------------------------------------------------------------------
+    # Predictions über den gesamten Val-Loader sammeln
+    # ------------------------------------------------------------------
+
+    def _collect_predictions(self, val_dl, pl_module):
+        """Iteriert über den kompletten Val-Loader und gibt (preds, targets) als numpy-Arrays zurück.
+
+        Vorhersagen werden denormalisiert (absolute Einheit der Zielgröße),
+        sofern target_mean / target_std in den Hyperparametern hinterlegt sind.
+        """
+        all_preds, all_targets = [], []
+
+        target_mean = getattr(pl_module.hparams, "target_mean", 0.0)
+        target_std  = getattr(pl_module.hparams, "target_std",  1.0)
+
+        pl_module.eval()
+        with torch.no_grad():
+            for x, y in val_dl:
+                x = x.to(pl_module.device)
+                preds_norm = pl_module(x).cpu()
+                preds_abs  = preds_norm * target_std + target_mean
+                all_preds.append(preds_abs)
+                all_targets.append(y.cpu())
+
+        preds_np   = torch.cat(all_preds).numpy()
+        targets_np = torch.cat(all_targets).numpy()
+        return preds_np, targets_np
+
+    # ------------------------------------------------------------------
+    # Alle drei Plots erzeugen und loggen
+    # ------------------------------------------------------------------
+
+    def _generate_plots(self, preds, targets, title_prefix, run_id, artifact_dir, filename_prefix):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._plot_scatter(preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_residuals(preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_error_distribution(preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+
+    # ------------------------------------------------------------------
+    # Hilfsmethod
+    # ------------------------------------------------------------------
+
+    def _log(self, fig, path, run_id, artifact_dir):
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        mlflow.MlflowClient().log_artifact(run_id, path, artifact_path=artifact_dir)
+
+    # ------------------------------------------------------------------
+    # Plot-Methoden
+    # ------------------------------------------------------------------
+
+    def _plot_scatter(self, preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.scatter(targets, preds, alpha=0.4, edgecolors="none", s=20, color="#4c72b0")
+        min_val = min(targets.min(), preds.min())
+        max_val = max(targets.max(), preds.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        ax.set_xlabel("Tatsächlich [min]")
+        ax.set_ylabel("Vorhergesagt [min]")
+        ax.set_title(f"{title_prefix} – Vorhergesagt vs. Tatsächlich")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}scatter.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/scatter")
+
+    def _plot_residuals(self, preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        residuals = preds - targets
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(targets, residuals, alpha=0.4, edgecolors="none", s=20, color="#55a868")
+        ax.axhline(0, color="red", linestyle="--", linewidth=1.5)
+        ax.set_xlabel("Tatsächlich [min]")
+        ax.set_ylabel("Residuum [min] (Vorhergesagt – Tatsächlich)")
+        ax.set_title(f"{title_prefix} – Residuen-Plot")
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}residuals.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/residuals")
+
+    def _plot_error_distribution(self, preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        errors = preds - targets
+        fig, ax = plt.subplots(figsize=(7, 5))
+        sns.histplot(errors, ax=ax, kde=True, color="#4c72b0", alpha=0.6)
+        ax.axvline(errors.mean(), color="red", linestyle="--", linewidth=1.5,
+                   label=f"Mittelwert: {errors.mean():.2f} min")
+        ax.axvline(0, color="black", linestyle="-", linewidth=1.0, alpha=0.5)
+        ax.set_xlabel("Fehler [min] (Vorhergesagt – Tatsächlich)")
+        ax.set_ylabel("Häufigkeit")
+        ax.set_title(f"{title_prefix} – Fehlerverteilung")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}errors.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/errors")
+
+
+# ---------------------------------------------------------------------------
+# Epochenweise Regressions-Plots
+# ---------------------------------------------------------------------------
+
+class RegressionPredictionPlotCallback(_RegressionPlotMixin, Callback):
+    """
+    Loggt drei Regressions-Diagnose-Plots alle `plot_every_n_epochs` Epochen als MLflow-Artefakte.
+    Dateinamen enthalten die Epochennummer → Verlauf bleibt vollständig erhalten.
+
+    Parameters
+    ----------
+    plot_every_n_epochs : int
+        Frequenz der Plot-Erzeugung.
+    """
+
+    def __init__(self, plot_every_n_epochs: int = 10):
+        self.plot_every_n_epochs = plot_every_n_epochs
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.current_epoch % self.plot_every_n_epochs != 0:
+            return
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        preds, targets = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        self._generate_plots(
+            preds, targets,
+            title_prefix=f"Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots",
+            filename_prefix=f"ep{epoch:04d}_",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Best-Model Regressions-Plots (werden überschrieben)
+# ---------------------------------------------------------------------------
+
+class BestRegressionModelPlotCallback(_RegressionPlotMixin, Callback):
+    """
+    Loggt drei Regressions-Diagnose-Plots für das aktuell beste Modell unter 'plots/best/'.
+    Die Dateien haben feste Namen und werden überschrieben, sobald ein besseres
+    Ergebnis erzielt wird.
+    """
+
+    def __init__(self):
+        self._last_best_path: str = ""
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        best_path = ""
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
+                best_path = cb.best_model_path
+                break
+
+        if not best_path or best_path == self._last_best_path:
+            return
+
+        self._last_best_path = best_path
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        preds, targets = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        logger.info(f"Neues bestes Modell (Epoch {epoch}) – Regressions-Best-Plots werden überschrieben.")
+
+        self._generate_plots(
+            preds, targets,
+            title_prefix=f"Bestes Modell – Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots/best",
+            filename_prefix="",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stepset: gemeinsame Basis-Klasse mit Plot-Logik
+# ---------------------------------------------------------------------------
+
+class _StepsetPlotMixin:
+    """
+    Mixin mit geteilter Prediction-Collection und Plot-Logik für Multi-Label-Klassifikation.
+    Wird von StepsetPredictionPlotCallback und BestStepsetModelPlotCallback genutzt.
+    """
+
+    n_examples: int
+
+    # ------------------------------------------------------------------
+    # Predictions über den gesamten Val-Loader sammeln
+    # ------------------------------------------------------------------
+
+    def _collect_predictions(self, val_dl, pl_module):
+        """Iteriert über den kompletten Val-Loader.
+
+        Returns
+        -------
+        preds : torch.BoolTensor  [N, num_classes]
+        targets : torch.BoolTensor  [N, num_classes]
+        """
+        all_preds, all_targets = [], []
+        pl_module.eval()
+        with torch.no_grad():
+            for x, y in val_dl:
+                x = x.to(pl_module.device)
+                logits = pl_module(x).cpu()
+                preds = torch.sigmoid(logits) > pl_module.hparams.threshold
+                all_preds.append(preds)
+                all_targets.append(y.bool().cpu())
+        return torch.cat(all_preds), torch.cat(all_targets)
+
+    # ------------------------------------------------------------------
+    # Beide Plots erzeugen und loggen
+    # ------------------------------------------------------------------
+
+    def _generate_plots(self, preds, targets, title_prefix, run_id, artifact_dir, filename_prefix):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._plot_examples(preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_class_metrics(preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+
+    # ------------------------------------------------------------------
+    # Hilfsmethode
+    # ------------------------------------------------------------------
+
+    def _log(self, fig, path, run_id, artifact_dir):
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        mlflow.MlflowClient().log_artifact(run_id, path, artifact_path=artifact_dir)
+
+    def _labels_from_mask(self, mask):
+        """Wandelt einen bool-Vektor in eine lesbare Schritt-Liste um."""
+        steps = [STEP_LABELS[i] for i, v in enumerate(mask) if v]
+        return " | ".join(steps) if steps else "–"
+
+    # ------------------------------------------------------------------
+    # Plot-Methoden
+    # ------------------------------------------------------------------
+
+    def _plot_examples(self, preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        n = min(self.n_examples, targets.size(0))
+        rows = []
+        for i in range(n):
+            gt = self._labels_from_mask(targets[i])
+            pred = self._labels_from_mask(preds[i])
+            rows.append([gt, pred])
+
+        fig, ax = plt.subplots(figsize=(14, n * 0.65 + 1.8))
+        ax.axis("off")
+        table = ax.table(
+            cellText=rows,
+            colLabels=["Ground Truth", "Vorhergesagt"],
+            cellLoc="left",
+            loc="center",
+            colWidths=[0.50, 0.50],
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(9)
+        table.scale(1, 1.5)
+
+        for i, row in enumerate(rows):
+            color = "#c8e6c9" if row[0] == row[1] else "#ffffff"
+            for j in range(2):
+                table[i + 1, j].set_facecolor(color)
+
+        ax.set_title(
+            f"{title_prefix} – Vorhersage-Beispiele  (grün = exakte Übereinstimmung)",
+            pad=12, fontsize=11,
+        )
+        path = os.path.join(tmp, f"{filename_prefix}examples.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/examples")
+
+    def _plot_class_metrics(self, preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        preds_np = preds.numpy()
+        targets_np = targets.numpy()
+        n_classes = len(STEP_LABELS)
+
+        precisions, recalls, f1s = [], [], []
+        for c in range(n_classes):
+            tp = ((preds_np[:, c] == 1) & (targets_np[:, c] == 1)).sum()
+            fp = ((preds_np[:, c] == 1) & (targets_np[:, c] == 0)).sum()
+            fn = ((preds_np[:, c] == 0) & (targets_np[:, c] == 1)).sum()
+            p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) > 0 else 0.0
+            precisions.append(float(p))
+            recalls.append(float(r))
+            f1s.append(float(f1))
+
+        x = np.arange(n_classes)
+        width = 0.25
+        fig, ax = plt.subplots(figsize=(11, 5))
+        bars_p = ax.bar(x - width, precisions, width, label="Precision", color="#4c72b0", edgecolor="black")
+        bars_r = ax.bar(x,         recalls,    width, label="Recall",    color="#55a868", edgecolor="black")
+        bars_f = ax.bar(x + width, f1s,        width, label="F1",        color="#c44e52", edgecolor="black")
+        ax.set_xticks(x)
+        ax.set_xticklabels(STEP_LABELS, rotation=20, ha="right")
+        ax.set_ylim(0, 1.15)
+        ax.set_ylabel("Wert")
+        ax.set_title(f"{title_prefix} – Precision, Recall & F1 pro Prozessschritt")
+        ax.legend()
+        for bar, val in zip(list(bars_p) + list(bars_r) + list(bars_f), precisions + recalls + f1s):
+            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.02,
+                    f"{val:.2f}", ha="center", va="bottom", fontsize=7)
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}class_metrics.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/class_metrics")
+
+
+# ---------------------------------------------------------------------------
+# Epochenweise Stepset-Plots
+# ---------------------------------------------------------------------------
+
+class StepsetPredictionPlotCallback(_StepsetPlotMixin, Callback):
+    """
+    Loggt zwei Diagnose-Plots alle `plot_every_n_epochs` Epochen als MLflow-Artefakte.
+    Dateinamen enthalten die Epochennummer → Verlauf bleibt vollständig erhalten.
+
+    Parameters
+    ----------
+    plot_every_n_epochs : int
+        Frequenz der Plot-Erzeugung.
+    n_examples : int
+        Anzahl der Beispiele in der Vorhersage-Tabelle.
+    """
+
+    def __init__(self, plot_every_n_epochs: int = 10, n_examples: int = 8):
+        self.plot_every_n_epochs = plot_every_n_epochs
+        self.n_examples = n_examples
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.current_epoch % self.plot_every_n_epochs != 0:
+            return
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        preds, targets = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        self._generate_plots(
+            preds, targets,
+            title_prefix=f"Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots",
+            filename_prefix=f"ep{epoch:04d}_",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Best-Model Stepset-Plots (werden überschrieben)
+# ---------------------------------------------------------------------------
+
+class BestStepsetModelPlotCallback(_StepsetPlotMixin, Callback):
+    """
+    Loggt zwei Diagnose-Plots für das aktuell beste Modell unter 'plots/best/'.
+    Die Dateien haben feste Namen und werden überschrieben, sobald ein besseres
+    Ergebnis erzielt wird.
+
+    Parameters
+    ----------
+    n_examples : int
+        Anzahl der Beispiele in der Vorhersage-Tabelle.
+    """
+
+    def __init__(self, n_examples: int = 8):
+        self.n_examples = n_examples
+        self._last_best_path: str = ""
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        best_path = ""
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
+                best_path = cb.best_model_path
+                break
+
+        if not best_path or best_path == self._last_best_path:
+            return
+
+        self._last_best_path = best_path
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        preds, targets = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        logger.info(f"Neues bestes Modell (Epoch {epoch}) – Stepset-Best-Plots werden überschrieben.")
+
+        self._generate_plots(
+            preds, targets,
             title_prefix=f"Bestes Modell – Epoch {epoch}",
             run_id=trainer.logger.run_id,
             artifact_dir="plots/best",

@@ -16,10 +16,16 @@ Ausführung
     python -m mpp.ml.pipelines.cadtostepset.model_input_to_tuned_model
 """
 
-from pathlib import Path
+import logging
 
 import mlflow
+import torch
 
+from mpp.constants import PATHS
+from mpp.ml.callbacks.artifact_callbacks import (
+    BestStepsetModelPlotCallback,
+    StepsetPredictionPlotCallback,
+)
 from mpp.ml.models.classifier.cadtostepset import ProcessClassificationTrsfmEncoderModule
 from mpp.ml.pipelines.base_pipeline import (
     build_callbacks,
@@ -31,12 +37,39 @@ from mpp.ml.pipelines.base_pipeline import (
     suggest_hyperparams,
 )
 
-_CFG_PATH = Path(__file__).parents[4] / "config" / "cadtostepset.yaml"
+logger = logging.getLogger(__name__)
+
+_CFG_PATH = PATHS.CONFIG / "cadtostepset.yaml"
 cfg = load_config(_CFG_PATH)
+
+
+def compute_pos_weight(train_loader) -> torch.Tensor:
+    """Berechnet pos_weight = neg_count / pos_count pro Klasse aus dem Trainings-Loader.
+
+    Wird als Gewichtung für BCEWithLogitsLoss verwendet, um Klassen-Imbalance
+    auszugleichen (z.B. schleifen/kontrollieren mit nur ~8% Häufigkeit).
+
+    Returns
+    -------
+    torch.Tensor
+        1D-Tensor der Form [num_classes] mit Gewichten ≥ 1 für seltene Klassen.
+    """
+    total = 0
+    pos_counts = None
+    for _, y in train_loader:
+        pos_counts = y.sum(dim=0) if pos_counts is None else pos_counts + y.sum(dim=0)
+        total += y.size(0)
+    neg_counts = total - pos_counts
+    pos_weight = (neg_counts / pos_counts.clamp(min=1)).float()
+    logger.info(f"pos_weight berechnet: {pos_weight.tolist()}")
+    return pos_weight
 
 
 def main():
     train_loader, val_loader = get_dataloaders(cfg)
+
+    # pos_weight einmalig aus Trainingsdaten berechnen
+    pos_weight = compute_pos_weight(train_loader)
 
     # ------------------------------------------------------------------
     # Hyperparameter-Tuning
@@ -44,6 +77,7 @@ def main():
     def objective(trial):
         hp = suggest_hyperparams(trial, cfg["hyperparameter_search"])
         max_epochs = cfg["training"]["tuning_epochs"]
+        torch.set_float32_matmul_precision("medium")
 
         model = ProcessClassificationTrsfmEncoderModule(
             lr=hp["lr"],
@@ -52,31 +86,45 @@ def main():
             dropout=hp["dropout"],
             weight_decay=cfg["training"]["weight_decay"],
             max_epochs=max_epochs,
+            use_scheduler=False,
+            pos_weight=pos_weight,
         )
 
-        mlf_logger = build_mlflow_logger(cfg, cfg["mlflow"]["tuning_experiment_name"])
-        callbacks = build_callbacks(
-            cfg,
-            cfg["checkpoint"]["tuning_subdir"],
-            cfg["checkpoint"]["filename"],
-            patience=cfg["training"]["tuning_patience"],
-        )
-        trainer = build_trainer(cfg, max_epochs, mlf_logger, callbacks)
-        trainer.fit(model, train_loader, val_loader)
+        with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True) as child_run:
+            mlf_logger = build_mlflow_logger(
+                cfg,
+                cfg["mlflow"]["tuning_experiment_name"],
+                run_id=child_run.info.run_id,
+            )
+            callbacks = build_callbacks(
+                cfg,
+                cfg["checkpoint"]["tuning_subdir"],
+                cfg["checkpoint"]["filename"],
+                patience=cfg["training"]["tuning_patience"],
+            )
+            callbacks.append(StepsetPredictionPlotCallback(
+                plot_every_n_epochs=cfg["training"]["plot_every_n_epochs"],
+            ))
+            callbacks.append(BestStepsetModelPlotCallback())
+            trainer = build_trainer(cfg, max_epochs, mlf_logger, callbacks)
+            trainer.fit(model, train_loader, val_loader)
 
-        val_loss = trainer.callback_metrics["val_loss"].item()
-        mlf_logger.log_hyperparams(trial.params)
-        mlf_logger.log_metrics({"val_loss": val_loss})
+            val_loss = trainer.callback_metrics["val_loss"].item()
+            mlf_logger.log_hyperparams(trial.params)
+            mlf_logger.log_metrics({"val_loss": val_loss})
+
         return val_loss
 
     mlflow.set_tracking_uri(cfg["mlflow"]["tracking_uri"])
-    mlflow.set_experiment(cfg["mlflow"]["experiment_name"])
-    study = run_tuning(cfg, objective)
+    mlflow.set_experiment(cfg["mlflow"]["tuning_experiment_name"])
+    with mlflow.start_run(run_name="optuna-study"):
+        study = run_tuning(cfg, objective)
 
     # ------------------------------------------------------------------
     # Finales Training mit besten Hyperparametern
     # ------------------------------------------------------------------
     best = study.best_trial.params
+    torch.set_float32_matmul_precision("high")
 
     model = ProcessClassificationTrsfmEncoderModule(
         lr=best["lr"],
@@ -85,6 +133,7 @@ def main():
         dropout=best["dropout"],
         weight_decay=cfg["training"]["weight_decay"],
         max_epochs=cfg["training"]["final_epochs"],
+        pos_weight=pos_weight,
     )
 
     mlf_logger = build_mlflow_logger(
@@ -96,6 +145,10 @@ def main():
         cfg["checkpoint"]["filename"],
         patience=cfg["training"]["final_patience"],
     )
+    callbacks.append(StepsetPredictionPlotCallback(
+        plot_every_n_epochs=cfg["training"]["plot_every_n_epochs"],
+    ))
+    callbacks.append(BestStepsetModelPlotCallback())
     trainer = build_trainer(cfg, cfg["training"]["final_epochs"], mlf_logger, callbacks)
     trainer.fit(model, train_loader, val_loader)
 

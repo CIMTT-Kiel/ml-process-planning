@@ -8,7 +8,7 @@ mlflow:
 
 data:
   batch_size: 800
-  num_workers: 8
+  num_workers: 0
   input_type: "vecset"
   # target_type wird in der jeweiligen Task-Config gesetzt
 
@@ -20,3 +20,4 @@ training:
   final_patience: 30    # EarlyStopping-Patience beim finalen Training
   log_every_n_steps: 5
   weight_decay: 0.01
+  gpu_id: 0             # GPU-Index (0 oder 1)

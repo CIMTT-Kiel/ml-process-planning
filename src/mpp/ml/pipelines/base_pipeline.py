@@ -213,7 +213,7 @@ def build_trainer(
         enable_model_summary=False,
         log_every_n_steps=cfg["training"]["log_every_n_steps"],
         callbacks=callbacks,
-        devices=1
+        devices=[cfg["training"]["gpu_id"]],
     )
 
 
