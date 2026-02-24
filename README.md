@@ -16,7 +16,7 @@ This repository implements machine learning models for manufacturing process pla
 - **Process Time Regression**: Estimate manufacturing time requirements
 - **Process Cost Regression**: Estimate manufacturing Cost requirements - upcomming
 
-The project leverages the FabriCAD dataset and implements for example transformer-based architectures for sequence-to-sequence learning in manufacturing contexts.
+The project leverages the FabriCAD dataset and implements transformer-based architectures for sequence-to-sequence learning in manufacturing contexts.
 
 ## 🏗️ Project Structure
 
@@ -33,7 +33,14 @@ ml-process-planning/
 ├── src/                           # Source code
 │   └── mpp/                       # Main package
 │       ├── constants.py           # Project constants and configurations
+│       ├── config/                # YAML configuration files
+│       │   ├── base.yaml                    # Shared base config (batch_size, gpu_id, ...)
+│       │   ├── cadtoseq.yaml                # Config for sequence prediction
+│       │   ├── cadtostepset.yaml            # Config for step classification
+│       │   └── process_time_regression.yaml # Config for time regression
 │       ├── ml/                    # Machine learning modules
+│       │   ├── callbacks/         # PyTorch Lightning callbacks
+│       │   │   └── artifact_callbacks.py    # MLflow artifact logging (plots, checkpoints)
 │       │   ├── datasets/          # Data loading and preprocessing
 │       │   │   ├── fabricad_datamodule.py    # FabriCAD dataset pl-integration
 │       │   │   ├── fabricad.py               # FabriCAD pt Dataset
@@ -46,7 +53,7 @@ ml-process-planning/
 │       │   │   │   ├── multilabel_classifier.py # Generic multi-label classifier
 │       │   │   │   └── VoxelEncoder.py          # 3D voxel encoding (outdatated)
 │       │   │   ├── regressor/     # Regression models
-│       │   │   │   ├── process_time_regressor.py     # Time & cost estimation
+│       │   │   │   ├── process_time_regressor.py     # Time regression Lightning module
 │       │   │   │   └── trsfm_encoder_regressor.py    # Transformer-based regressor
 │       │   │   ├── sequence/      # Sequence prediction models
 │       │   │   │   ├── cadtoseq_module.py      # CAD-to-sequence pipeline
@@ -55,7 +62,8 @@ ml-process-planning/
 │       │   │       ├── best_model/       # tuned models pool
 │       │   │       └── tuning/           # Hyperparameter tuning results
 │       │   └── pipelines/         # Training and inference pipelines
-│       │       ├── cadtoseq/             # Sequence prediction pipelines - with tuning pipeline etc.
+│       │       ├── base_pipeline.py             # Shared utilities (Trainer, Logger, Callbacks)
+│       │       ├── cadtoseq/             # Sequence prediction pipelines
 │       │       ├── cadtostepset/         # Step classification pipelines
 │       │       └── process-time-regression/ # Time regression pipelines
 └── tests/                         # for unit tests - not implemented yet
@@ -80,7 +88,7 @@ ml-process-planning/
    ```bash
    # Install uv if not already installed
    curl -LsSf https://astral.sh/uv/install.sh | sh
-   
+
    # Install project dependencies
    uv sync
    ```
@@ -90,7 +98,7 @@ ml-process-planning/
    # Create virtual environment
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
-   
+
    # Install project
    pip install -e .
    ```
@@ -113,18 +121,23 @@ This installs additional dependencies for:
 - **Architecture**: Transformer-based sequence-to-sequence model
 - **Input**: Vecsets
 - **Output**: Ordered sequence of standard manufacturing operations
+- **Metrics**: Levenshtein distance, token-wise accuracy, confusion matrix
 
 ### 2. CAD-to-Step Classification (`cadtostepset`)
 - **Purpose**: Predict required manufacturing steps (multi-label classification)
-- **Architecture**: Multi-label transformer classifier
+- **Architecture**: Transformer encoder with multi-label classification head
 - **Input**: Vecsets
-- **Output**: predictions manufacturing steps as a set - no ordering or multiple accurance of steps
+- **Output**: Set of required manufacturing steps (no ordering, no repetition)
+- **Loss**: BCEWithLogitsLoss with per-class `pos_weight` to handle class imbalance
+- **Metrics**: Per-class Precision, Recall, F1; Macro-F1
 
-### 3. Process Time Regression
-- **Purpose**: Estimate total-manufacturing time for processes
+### 3. Process Time Regression (`process-time-regression`)
+- **Purpose**: Estimate total manufacturing time for a part
 - **Architecture**: Transformer encoder with regression head
 - **Input**: Vecsets
-- **Output**: Continuous time estimates
+- **Output**: Continuous time estimate in minutes
+- **Loss**: HuberLoss (robust to outliers) on z-score normalized targets
+- **Metrics**: MAE and RMSE in absolute minutes
 
 ### 4. VoxelEncoder - !Only for Benchmark and testing!
 - **Purpose**: Encode 3D CAD data into feature representations
@@ -150,45 +163,76 @@ The project supports multiple manufacturing datasets:
 
 ### MLflow Experiment Tracking
 
-The project uses MLflow for comprehensive experiment management:
+The project uses a remote MLflow server for experiment tracking (configured in `config/base.yaml`):
 
-```bash
-# Start MLflow UI to view experiments
-mlflow ui --backend-store-uri ./mlruns
+```yaml
+mlflow:
+  tracking_uri: "http://mlflow-server:5000"
 ```
+
+Each training run logs hyperparameters, metrics, plots, and model checkpoints automatically.
 
 ### Training Pipelines
 
-Each model type has its dedicated training pipeline:
+Each model type has its dedicated training pipeline that runs Optuna hyperparameter tuning followed by a final training run with the best configuration:
 
 ```bash
 # Train CAD-to-sequence model
-python src/mpp/ml/pipelines/cadtoseq/model_input_to_tuned_model.py
+python -m mpp.ml.pipelines.cadtoseq.model_input_to_tuned_model
 
 # Train step classification model
-python src/mpp/ml/pipelines/cadtostepset/model_input_to_tuned_model.py
+python -m mpp.ml.pipelines.cadtostepset.model_input_to_tuned_model
 
-# Train time regression model  
-python src/mpp/ml/pipelines/process-time-regression/model_input_to_tuned_model.py
+# Train time regression model
+python -m "mpp.ml.pipelines.process-time-regression.model_input_to_tuned_model"
 ```
 
 ### Hyperparameter Optimization
 
-The project includes Optuna-based hyperparameter tuning:
-- Automated search for optimal model configurations
-- Multi-objective optimization support
-- Results stored in `checkpoints/tuning/`
+The project uses Optuna for automated hyperparameter search. Each tuning trial is logged as a nested MLflow run. Results (best checkpoint) are stored under `checkpoints/tuning/`.
 
 ## 📈 Model Evaluation
 
-
 ### Metrics
-The project implements manufacturing-specific evaluation metrics in `ml/metrics/sequences.py`:
-- Sequence similarity measures
-- Manufacturing step accuracy
-- Process plan validity checks
+
+| Approach | Metrics |
+|---|---|
+| cadtoseq | Levenshtein distance, token-wise accuracy, confusion matrix |
+| cadtostepset | Per-class Precision / Recall / F1, Macro-F1 |
+| process-time-regression | MAE [min], RMSE [min] |
+
+All metrics and diagnostic plots are logged automatically to MLflow during training.
 
 ## 🛠️ Configuration
+
+### YAML-based Configuration System
+
+All training parameters are controlled via YAML files in `src/mpp/config/`. The `base.yaml` defines shared defaults; each task config inherits from it and can override any value.
+
+Key parameters in `base.yaml`:
+
+```yaml
+data:
+  batch_size: 2048
+  num_workers: 0
+
+training:
+  n_trials: 35          # Optuna tuning trials
+  tuning_epochs: 50
+  final_epochs: 1000
+  tuning_patience: 20
+  final_patience: 30
+  gpu_id: 0             # GPU index (0 or 1)
+  weight_decay: 0.01
+```
+
+To run a task on a specific GPU, set `gpu_id` in the corresponding task config:
+
+```yaml
+# e.g. cadtostepset.yaml
+training:
+  gpu_id: 1
+```
 
 ### Constants and Settings
 Global configurations are managed in `src/mpp/constants.py`:
@@ -231,7 +275,7 @@ Global configurations are managed in `src/mpp/constants.py`:
 
 **Author**: Michel Kruse (michel.kruse@fh-kiel.de)
 
-**Organization**: Center for Industrial Manufacturing Technology and Transfer (CIMTT)  
+**Organization**: Center for Industrial Manufacturing Technology and Transfer (CIMTT)
 Kiel University of Applied Sciences
 
 ## 📄 License
