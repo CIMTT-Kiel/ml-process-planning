@@ -168,7 +168,7 @@ def build_callbacks(
     )
     checkpoint = ModelCheckpoint(
         monitor="val_loss",
-        save_top_k=1,
+        save_top_k=3,
         mode="min",
         dirpath=(PATHS.CKPT_DIR / checkpoint_subdir).as_posix(),
         filename=filename,

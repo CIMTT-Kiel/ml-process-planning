@@ -152,39 +152,46 @@ class _SequencePlotMixin:
             cm[ti, pi] += 1
 
         labels = [INV_VOCAB[i] for i in range(n)]
+
+        # Absolute Konfusionsmatrix
         fig, ax = plt.subplots(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                     xticklabels=labels, yticklabels=labels, ax=ax)
         ax.set_xlabel("Vorhergesagt")
         ax.set_ylabel("Ground Truth")
-        ax.set_title(f"{title_prefix} – Token-Konfusionsmatrix (Teacher-Forced)")
+        ax.set_title(f"{title_prefix} – Token-Konfusionsmatrix absolut (Teacher-Forced)")
         path = os.path.join(tmp, f"{filename_prefix}confusion.png")
         self._log(fig, path, run_id, f"{artifact_dir}/confusion")
+
+        # Relative Konfusionsmatrix (zeilenweise normiert, d. h. Recall pro Klasse)
+        row_sums = cm.sum(axis=1, keepdims=True)
+        cm_rel = np.where(row_sums > 0, cm / row_sums, 0.0)
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        sns.heatmap(cm_rel, annot=True, fmt=".2f", cmap="Blues", vmin=0.0, vmax=1.0,
+                    xticklabels=labels, yticklabels=labels, ax=ax2)
+        ax2.set_xlabel("Vorhergesagt")
+        ax2.set_ylabel("Ground Truth")
+        ax2.set_title(f"{title_prefix} – Token-Konfusionsmatrix relativ (Teacher-Forced)")
+        path2 = os.path.join(tmp, f"{filename_prefix}confusion_rel.png")
+        self._log(fig2, path2, run_id, f"{artifact_dir}/confusion")
 
     def _plot_levenshtein(self, gen_preds, targets, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
         mask_t = self._comparator._create_mask(targets)
         mask_p = self._comparator._create_mask(gen_preds)
         dists = self._comparator.levenshtein_distance(
             gen_preds, targets, mask_p, mask_t
-        ).cpu().numpy()
+        ).cpu().numpy().astype(float)
 
-        max_dist = max(int(dists.max()), 1)
-
-        # Vollständiger Bereich [0, max_dist] – fehlende Werte werden mit 0 aufgefüllt
-        all_values = np.arange(0, max_dist + 1)
-        counts = np.bincount(dists.astype(int), minlength=max_dist + 1)
-        freq = counts / counts.sum()
-
-        fig, ax = plt.subplots(figsize=(9, 4), dpi=200)
-        ax.plot(all_values, freq, linewidth=2, color="#4c72b0")
-        ax.fill_between(all_values, freq, alpha=0.15, color="#4c72b0")
-        ax.axvline(dists.mean(), color="red", linestyle="--",
+        fig, ax = plt.subplots(figsize=(9, 4), dpi=150)
+        sns.kdeplot(data=dists, ax=ax, fill=True, color="#4c72b0",
+                    alpha=0.15, linewidth=2, clip=(0.0, None), bw_adjust=0.4)
+        ax.axvline(dists.mean(), color="red", linestyle="--", linewidth=1.5,
                    label=f"Mittelwert: {dists.mean():.2f}")
-        ax.set_xticks(all_values)
         ax.set_xlabel("Levenshtein-Distanz")
-        ax.set_ylabel("Relative Häufigkeit")
+        ax.set_ylabel("Dichte")
         ax.set_title(f"{title_prefix} – Levenshtein-Distanz (Autoregressive)")
         ax.legend()
+        fig.tight_layout()
         path = os.path.join(tmp, f"{filename_prefix}levenshtein.png")
         self._log(fig, path, run_id, f"{artifact_dir}/levenshtein")
 
@@ -213,26 +220,24 @@ class _SequencePlotMixin:
 
 class MLflowCheckpointCallback(Callback):
     """
-    Loggt den besten Checkpoint als MLflow-Artefakt unter 'checkpoints/',
-    sobald ModelCheckpoint eine neue beste Version speichert.
+    Loggt die besten Checkpoints (save_top_k) als MLflow-Artefakte unter
+    'checkpoints/' am Ende des Trainings. So werden genau die Top-k Modelle
+    gespeichert – ohne Akkumulation aller Zwischenstände.
     """
 
-    def __init__(self):
-        self._last_logged: str = ""
-
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def on_train_end(self, trainer, pl_module):
         if not isinstance(trainer.logger, MLFlowLogger):
             return
         for cb in trainer.callbacks:
-            if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
-                if cb.best_model_path != self._last_logged:
-                    mlflow.MlflowClient().log_artifact(
-                        trainer.logger.run_id,
-                        cb.best_model_path,
-                        artifact_path="checkpoints",
-                    )
-                    self._last_logged = cb.best_model_path
-                    logger.info(f"Checkpoint nach MLflow geloggt: {cb.best_model_path}")
+            if isinstance(cb, ModelCheckpoint):
+                for path in cb.best_k_models:
+                    if path:
+                        mlflow.MlflowClient().log_artifact(
+                            trainer.logger.run_id,
+                            path,
+                            artifact_path="checkpoints",
+                        )
+                        logger.info(f"Checkpoint nach MLflow geloggt: {path}")
 
 
 # ---------------------------------------------------------------------------

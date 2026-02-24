@@ -57,6 +57,7 @@ def main():
             dropout=hp["dropout"],
             weight_decay=cfg["training"]["weight_decay"],
             max_epochs=max_epochs,
+            use_scheduler=False,
         )
 
         with mlflow.start_run(run_name=f"trial-{trial.number}", nested=True) as child_run:

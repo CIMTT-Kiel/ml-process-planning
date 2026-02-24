@@ -8,7 +8,7 @@ mlflow:
 
 data:
   batch_size: 800
-  num_workers: 0
+  num_workers: 8
   input_type: "vecset"
   # target_type wird in der jeweiligen Task-Config gesetzt
 
@@ -16,7 +16,7 @@ training:
   n_trials: 35          # Anzahl Optuna-Trials für Hyperparameter-Tuning
   tuning_epochs: 50     # Max. Epochen pro Tuning-Trial
   final_epochs: 1000    # Max. Epochen für das finale Best-Model Training
-  tuning_patience: 10   # EarlyStopping-Patience beim Tuning
+  tuning_patience: 20   # EarlyStopping-Patience beim Tuning
   final_patience: 30    # EarlyStopping-Patience beim finalen Training
-  log_every_n_steps: 1
+  log_every_n_steps: 5
   weight_decay: 0.01

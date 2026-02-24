@@ -44,11 +44,12 @@ class ARMSTM(pl.LightningModule):
         Maximum number of epochs for training (default: 100).
     """
 
-    def __init__(self, lr=0.00003, embed_dim=128, nhead=4, num_layers = 3, dropout=0.3,  weight_decay=0.01, max_epochs=100):
+    def __init__(self, lr=0.00003, embed_dim=128, nhead=4, num_layers = 3, dropout=0.3,  weight_decay=0.01, max_epochs=100, use_scheduler=True):
         super().__init__()
         self.lr = lr
         self.weight_decay = weight_decay
         self.max_epochs = max_epochs
+        self.use_scheduler = use_scheduler
 
         #model spezific
         self.embed_dim = embed_dim
@@ -226,17 +227,16 @@ class ARMSTM(pl.LightningModule):
             weight_decay=self.hparams.weight_decay  
         )
 
-        # Cosine Annealing Scheduler
+        if not self.use_scheduler:
+            return optimizer
+
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=200,  # max epochs for one cycle
-            eta_min=0.000001  # min learning rate to reach
+            T_max=self.hparams.max_epochs,
+            eta_min=1e-6,
         )
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "train_loss" 
-            }
+            "lr_scheduler": {"scheduler": scheduler},
         }
