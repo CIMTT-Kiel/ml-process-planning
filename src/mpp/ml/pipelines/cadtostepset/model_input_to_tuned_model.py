@@ -43,11 +43,18 @@ _CFG_PATH = PATHS.CONFIG / "cadtostepset.yaml"
 cfg = load_config(_CFG_PATH)
 
 
-def compute_pos_weight(train_loader) -> torch.Tensor:
+def compute_pos_weight(train_loader, cap: float | None = None) -> torch.Tensor:
     """Berechnet pos_weight = neg_count / pos_count pro Klasse aus dem Trainings-Loader.
 
     Wird als Gewichtung für BCEWithLogitsLoss verwendet, um Klassen-Imbalance
-    auszugleichen (z.B. schleifen/kontrollieren mit nur ~8% Häufigkeit).
+    auszugleichen (z.B. schleifen/kontrollieren mit nur ~8% Häufigkeit → raw ~11.5).
+
+    Parameters
+    ----------
+    cap : float or None
+        Optionale Obergrenze für pos_weight. Verhindert, dass sehr seltene Klassen
+        den Loss dominieren und Recall auf ~90% fixieren, während Precision leidet.
+        Empfehlung: 4.0 (konfigurierbar in cadtostepset.yaml → training.pos_weight_cap).
 
     Returns
     -------
@@ -61,7 +68,9 @@ def compute_pos_weight(train_loader) -> torch.Tensor:
         total += y.size(0)
     neg_counts = total - pos_counts
     pos_weight = (neg_counts / pos_counts.clamp(min=1)).float()
-    logger.info(f"pos_weight berechnet: {pos_weight.tolist()}")
+    if cap is not None:
+        pos_weight = pos_weight.clamp(max=cap)
+    logger.info(f"pos_weight berechnet (cap={cap}): {pos_weight.tolist()}")
     return pos_weight
 
 
@@ -69,7 +78,8 @@ def main():
     train_loader, val_loader = get_dataloaders(cfg)
 
     # pos_weight einmalig aus Trainingsdaten berechnen
-    pos_weight = compute_pos_weight(train_loader)
+    pos_weight_cap = cfg["training"].get("pos_weight_cap", None)
+    pos_weight = compute_pos_weight(train_loader, cap=pos_weight_cap)
 
     # ------------------------------------------------------------------
     # Hyperparameter-Tuning
