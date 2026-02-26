@@ -11,10 +11,10 @@ A machine learning framework for manufacturing process planning, developed by th
 
 This repository implements machine learning models for manufacturing process planning, specifically:
 
-- **CAD to Process Sequence Prediction**: Transform CAD models into manufacturing process sequences
-- **CAD to Multi-label process-classification**: Predict sets of processing steps to manufactur a part
-- **Process Time Regression**: Estimate manufacturing time requirements
-- **Process Cost Regression**: Estimate manufacturing Cost requirements - upcomming
+- **CAD to Process Sequence Prediction**: Transform CAD models into ordered manufacturing process sequences
+- **CAD to Multi-label Process Classification**: Predict which processing steps are required to manufacture a part
+- **Process Time Regression**: Estimate total manufacturing time for a part
+- **Step-Time Regression**: Predict the duration of each individual manufacturing step (autoregressive encoder-decoder)
 
 The project leverages the FabriCAD dataset and implements transformer-based architectures for sequence-to-sequence learning in manufacturing contexts.
 
@@ -37,7 +37,8 @@ ml-process-planning/
 │       │   ├── base.yaml                    # Shared base config (batch_size, gpu_id, ...)
 │       │   ├── cadtoseq.yaml                # Config for sequence prediction
 │       │   ├── cadtostepset.yaml            # Config for step classification
-│       │   └── process_time_regression.yaml # Config for time regression
+│       │   ├── process_time_regression.yaml # Config for total-time regression
+│       │   └── step_time_regression.yaml    # Config for per-step time regression
 │       ├── ml/                    # Machine learning modules
 │       │   ├── callbacks/         # PyTorch Lightning callbacks
 │       │   │   └── artifact_callbacks.py    # MLflow artifact logging (plots, checkpoints)
@@ -53,8 +54,10 @@ ml-process-planning/
 │       │   │   │   ├── multilabel_classifier.py # Generic multi-label classifier
 │       │   │   │   └── VoxelEncoder.py          # 3D voxel encoding (outdatated)
 │       │   │   ├── regressor/     # Regression models
-│       │   │   │   ├── process_time_regressor.py     # Time regression Lightning module
-│       │   │   │   └── trsfm_encoder_regressor.py    # Transformer-based regressor
+│       │   │   │   ├── process_time_regressor.py         # Total-time regression Lightning module
+│       │   │   │   ├── trsfm_encoder_regressor.py        # Transformer encoder (shared backbone)
+│       │   │   │   ├── step_time_decoder.py              # Causal Transformer decoder for step times
+│       │   │   │   └── step_time_regression_module.py    # Step-time regression Lightning module
 │       │   │   ├── sequence/      # Sequence prediction models
 │       │   │   │   ├── cadtoseq_module.py      # CAD-to-sequence pipeline
 │       │   │   │   └── vecset_transformer.py   # Vector set transformer
@@ -63,9 +66,10 @@ ml-process-planning/
 │       │   │       └── tuning/           # Hyperparameter tuning results
 │       │   └── pipelines/         # Training and inference pipelines
 │       │       ├── base_pipeline.py             # Shared utilities (Trainer, Logger, Callbacks)
-│       │       ├── cadtoseq/             # Sequence prediction pipelines
-│       │       ├── cadtostepset/         # Step classification pipelines
-│       │       └── process-time-regression/ # Time regression pipelines
+│       │       ├── cadtoseq/                    # Sequence prediction pipeline
+│       │       ├── cadtostepset/                # Step classification pipeline
+│       │       ├── process-time-regression/     # Total-time regression pipeline
+│       │       └── step-time-regression/        # Per-step time regression pipeline
 └── tests/                         # for unit tests - not implemented yet
 ```
 
@@ -133,13 +137,23 @@ This installs additional dependencies for:
 
 ### 3. Process Time Regression (`process-time-regression`)
 - **Purpose**: Estimate total manufacturing time for a part
-- **Architecture**: Transformer encoder with regression head
+- **Architecture**: Transformer encoder + mean-pooling + regression head
 - **Input**: Vecsets
-- **Output**: Continuous time estimate in minutes
-- **Loss**: HuberLoss (robust to outliers) on z-score normalized targets
+- **Output**: Single continuous time estimate in minutes
+- **Loss**: HuberLoss on z-score normalized targets
 - **Metrics**: MAE and RMSE in absolute minutes
 
-### 4. VoxelEncoder - !Only for Benchmark and testing!
+### 4. Step-Time Regression (`step-time-regression`)
+- **Purpose**: Predict the duration of each individual manufacturing step
+- **Architecture**: Transformer encoder (shared backbone from model 3) + causal Transformer decoder
+- **Input**: Vecsets + step token sequence (e.g. from `cadtoseq`)
+- **Output**: Per-step time in minutes `[B, seq_len]`, autoregressive generation
+- **Loss**: HuberLoss per step (normalized) + λ · MSE(Σ predicted steps, total time) – both in normalized space
+- **Training**: Two phases – Phase 1 encoder frozen (decoder only), Phase 2 differential learning rates
+- **Inference**: Teacher forcing (validation) or autoregressive `generate()` / streaming `generate_stream()`
+- **Metrics**: MAE and RMSE per step, consistency MAE (total time)
+
+### 5. VoxelEncoder — benchmark only
 - **Purpose**: Encode 3D CAD data into feature representations
 - **Architecture**: 3D convolutional neural network
 - **Input**: Voxelized CAD models
@@ -183,23 +197,68 @@ python -m mpp.ml.pipelines.cadtoseq.model_input_to_tuned_model
 # Train step classification model
 python -m mpp.ml.pipelines.cadtostepset.model_input_to_tuned_model
 
-# Train time regression model
+# Train total-time regression model
 python -m "mpp.ml.pipelines.process-time-regression.model_input_to_tuned_model"
+
+# Train per-step time regression model
+python -m "mpp.ml.pipelines.step-time-regression.model_input_to_tuned_model"
 ```
+
+The step-time pipeline optionally warm-starts the encoder from a pretrained process-time checkpoint. Set `training.pretrained_encoder_ckpt` in `step_time_regression.yaml` accordingly (see `MIGRATION.md` for details).
 
 ### Hyperparameter Optimization
 
 The project uses Optuna for automated hyperparameter search. Each tuning trial is logged as a nested MLflow run. Results (best checkpoint) are stored under `checkpoints/tuning/`.
 
+## 🔍 Inference
+
+All models are loaded via PyTorch Lightning's `load_from_checkpoint`. Hyperparameters (including normalization statistics) are restored automatically.
+
+**Total-time regression:**
+```python
+from mpp.ml.models.regressor.process_time_regressor import ProcessRegressionModule
+
+model = ProcessRegressionModule.load_from_checkpoint("path/to/checkpoint.ckpt")
+model.eval()
+pred_norm = model(vecset)                          # [B], normalized
+pred_min  = pred_norm * model.hparams.target_std + model.hparams.target_mean
+```
+
+**Per-step time regression — full batch:**
+```python
+from mpp.ml.models.regressor.step_time_regression_module import StepTimeRegressionModule
+
+module = StepTimeRegressionModule.load_from_checkpoint("path/to/checkpoint.ckpt")
+module.eval()
+pred_norm = module.model.generate(vecset, step_tokens)   # [B, seq_len], normalized
+pred_min  = module._denormalize(pred_norm)               # [B, seq_len], minutes
+```
+
+**Per-step time regression — streaming (e.g. Streamlit):**
+```python
+from mpp.constants import INV_VOCAB
+
+for step_idx, token_id, time_min in module.model.generate_stream(
+    vecset,       # [1, 1024, 32]
+    step_tokens,  # [1, seq_len]
+    target_mean=module.hparams.target_mean,
+    target_std=module.hparams.target_std,
+):
+    print(f"  {INV_VOCAB[token_id]:>15s}  {time_min:6.1f} min")
+```
+
+`generate_stream` yields `(step_index, token_id, time_minutes)` one step at a time, enabling live UI updates while inference is still running.
+
 ## 📈 Model Evaluation
 
 ### Metrics
 
-| Approach | Metrics |
-|---|---|
-| cadtoseq | Levenshtein distance, token-wise accuracy, confusion matrix |
-| cadtostepset | Per-class Precision / Recall / F1, Macro-F1 |
-| process-time-regression | MAE [min], RMSE [min] |
+| Approach | Metrics | MLflow plots |
+|---|---|---|
+| `cadtoseq` | Levenshtein distance, token-wise accuracy, exact match | Prediction table, confusion matrix, Levenshtein distribution, token accuracy |
+| `cadtostepset` | Per-class Precision / Recall / F1, Macro-F1 | Prediction table, class metric bars |
+| `process-time-regression` | MAE [min], RMSE [min] | Scatter (pred vs. actual), residuals, error distribution |
+| `step-time-regression` | MAE per step [min], RMSE per step [min], consistency MAE [min] | Scatter per token type, MAE per step type, consistency scatter (Σ steps vs. total), error distribution |
 
 All metrics and diagnostic plots are logged automatically to MLflow during training.
 
@@ -213,7 +272,7 @@ Key parameters in `base.yaml`:
 
 ```yaml
 data:
-  batch_size: 2048
+  batch_size: 800
   num_workers: 0
 
 training:
@@ -224,6 +283,18 @@ training:
   final_patience: 30
   gpu_id: 0             # GPU index (0 or 1)
   weight_decay: 0.01
+```
+
+Additional parameters specific to `step_time_regression.yaml`:
+
+```yaml
+training:
+  freeze_encoder_epochs: 20       # Phase 1: encoder frozen, decoder only
+  encoder_lr_factor: 0.1          # Phase 2: encoder LR = lr × factor
+  lambda_consistency: 0.1         # weight for Σ-step vs. total-time loss
+  scheduled_sampling: false       # use own predictions as decoder input
+  scheduled_sampling_rate: 0.5    # fraction of batches using scheduled sampling
+  # pretrained_encoder_ckpt: "src/mpp/ml/models/checkpoints/best_model/time-regression/..."
 ```
 
 To run a task on a specific GPU, set `gpu_id` in the corresponding task config:
@@ -273,7 +344,7 @@ Global configurations are managed in `src/mpp/constants.py`:
 
 ## 👥 Team
 
-**Author**: Michel Kruse (michel.kruse@fh-kiel.de)
+**Author**: Michel Kruse (michel.kruse@haw-kiel.de)
 
 **Organization**: Center for Industrial Manufacturing Technology and Transfer (CIMTT)
 Kiel University of Applied Sciences
@@ -284,8 +355,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support and Contact
 
-- **Issues**: Report bugs via [GitHub Issues](https://github.com/CIMTT-Kiel/ml-process-planning/issues)
-- **Email**: michel.kruse@fh-kiel.de
+- **Email**: michel.kruse@haw-kiel.de
 - **Organization**: CIMTT, FH Kiel
 
 ## 🔗 Related Projects

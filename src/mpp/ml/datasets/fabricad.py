@@ -56,7 +56,7 @@ class Fabricad(Dataset):
         self.target_type = target_type
         self.input_type = input_type
 
-        assert self.target_type in ["time", "cost", "step-set", "seq"], ValueError(f"Not supported prediction type: {self.target_type}")
+        assert self.target_type in ["time", "cost", "step-set", "seq", "step-time"], ValueError(f"Not supported prediction type: {self.target_type}")
         assert self.input_type in ["vecset"], ValueError(f"Not supported input type: {self.input_type}")
 
         # check if a split file exists, if not create one
@@ -268,9 +268,53 @@ class Fabricad(Dataset):
             case "seq":
                 wrapped_steps = ["START"] + steps + ["STOP"]
                 return torch.Tensor(self.encode_sequence(wrapped_steps))
-            
+            case "step-time":
+                return self._parse_step_time(plan_item)
+
             # TODO here additional items can be added
         return None
+
+    def _parse_step_time(
+        self, plan_item: "pd.DataFrame"
+    ) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        """Gibt pro-Schritt-Tokens, pro-Schritt-Dauern und die Gesamtzeit zurück.
+
+        Die Filterlogik spiegelt die im ``"seq"``-Fall verwendete Logik wider:
+        Der erste Schritt (Index 0) und ``"liefern"`` werden ausgeschlossen, damit
+        Tokens und Dauern stets gleichlang und an den VOCAB-Einträgen ausgerichtet
+        sind.
+
+        NOTE: Die hier berechnete ``total_time`` ist die Summe der *gefilterten*
+        Schritte (ohne ersten Schritt und ohne ``"liefern"``).  Das unterscheidet
+        sich vom ``"time"``-Target, das alle Zeilen summiert.  Der Consistency-Loss
+        im Decoder basiert daher nur auf den tatsächlich vorhergesagten Schritten.
+
+        Parameters
+        ----------
+        plan_item : pd.DataFrame
+            Geladene ``plan.csv`` für eine Probe.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            - ``step_tokens``  : LongTensor der Form ``[seq_len]`` mit VOCAB-IDs
+            - ``step_times``   : FloatTensor der Form ``[seq_len]`` mit Dauern in Minuten
+            - ``total_time``   : skalares FloatTensor (Summe der Schritt-Dauern)
+        """
+        steps_col: list[str] = plan_item["Schritt"].tolist()[1:]
+        durations_col: list[float] = plan_item["Dauer[min]"].tolist()[1:]
+
+        # NOTE: "liefern" entfernen und gleichzeitig die korrespondierende
+        # Dauer aus der Dauer-Liste entfernen, damit Indizes übereinstimmen.
+        if "liefern" in steps_col:
+            liefern_idx = steps_col.index("liefern")
+            steps_col.pop(liefern_idx)
+            durations_col.pop(liefern_idx)
+
+        step_tokens = torch.tensor(self.encode_sequence(steps_col), dtype=torch.long)
+        step_times = torch.tensor(durations_col, dtype=torch.float32)
+        total_time = step_times.sum()
+        return step_tokens, step_times, total_time
     
     def parse_input_item(self, idx):
         """

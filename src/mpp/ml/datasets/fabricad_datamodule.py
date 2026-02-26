@@ -52,6 +52,50 @@ def collate_fn(batch):
 
     return vecsets, padded_plans
 
+
+def collate_fn_step_time(batch):
+    """Custom collate function für den ``"step-time"``-Target-Typ.
+
+    Stapelt Geometrie-Embeddings und paddet Token- und Zeitsequenzen variabler
+    Länge auf die längste Sequenz im Batch.
+
+    Parameters
+    ----------
+    batch : list of tuples
+        Jedes Element ist ein ``(vecset, (step_tokens, step_times, total_time))``-
+        Tupel, wie es von :class:`~mpp.ml.datasets.fabricad.Fabricad` mit
+        ``target_type="step-time"`` zurückgegeben wird.
+
+    Returns
+    -------
+    vecsets : torch.Tensor
+        Shape ``[B, set_size, input_dim]``.
+    padded_tokens : torch.Tensor
+        Shape ``[B, max_seq_len]``, PAD-Stellen mit ``VOCAB["PAD"]`` gefüllt.
+    padded_times : torch.Tensor
+        Shape ``[B, max_seq_len]``, PAD-Stellen mit ``0.0`` gefüllt.
+    total_times : torch.Tensor
+        Shape ``[B]``, Gesamtdauer je Probe (Summe der gefilterten Schritte).
+    """
+    vecsets, targets = zip(*batch)
+    step_tokens_list, step_times_list, total_times = zip(*targets)
+
+    vecsets = torch.stack(vecsets)                            # [B, set_size, input_dim]
+    total_times = torch.stack(list(total_times))              # [B]
+
+    max_len = max(t.size(0) for t in step_tokens_list)
+    B = len(step_tokens_list)
+
+    padded_tokens = torch.full((B, max_len), VOCAB["PAD"], dtype=torch.long)
+    padded_times = torch.zeros(B, max_len, dtype=torch.float32)
+
+    for i, (tokens, times) in enumerate(zip(step_tokens_list, step_times_list)):
+        n = tokens.size(0)
+        padded_tokens[i, :n] = tokens
+        padded_times[i, :n] = times
+
+    return vecsets, padded_tokens, padded_times, total_times
+
 class Fabricad_datamodule(pl.LightningDataModule):
     """
     PyTorch Lightning DataModule for loading the Fabricad dataset.
@@ -111,6 +155,14 @@ class Fabricad_datamodule(pl.LightningDataModule):
             self.test_dataset = Fabricad(mode="test", input_type=self.input_type, target_type=self.target_type)
             logger.info(f"Test dataset size: {len(self.test_dataset)}")
 
+    def _get_collate_fn(self):
+        """Gibt die passende collate-Funktion für den konfigurierten target_type zurück."""
+        if self.target_type == "seq":
+            return collate_fn
+        if self.target_type == "step-time":
+            return collate_fn_step_time
+        return None  # Standard-collate von PyTorch
+
     def train_dataloader(self):
         """
         Returns the training data loader.
@@ -121,10 +173,13 @@ class Fabricad_datamodule(pl.LightningDataModule):
             PyTorch DataLoader for the training set.
         """
         logger.debug("Creating train dataloader")
-        if self.target_type=="seq":
-            return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=collate_fn)
-        else:
-            return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            collate_fn=self._get_collate_fn(),
+        )
 
     def val_dataloader(self):
         """
@@ -136,11 +191,13 @@ class Fabricad_datamodule(pl.LightningDataModule):
             PyTorch DataLoader for the validation set.
         """
         logger.debug("Creating validation dataloader")
-        if self.target_type=="seq":
-            return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=collate_fn)
-        else:
-            return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
-
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=self._get_collate_fn(),
+        )
 
     def test_dataloader(self):
         """
@@ -152,10 +209,13 @@ class Fabricad_datamodule(pl.LightningDataModule):
             PyTorch DataLoader for the test set.
         """
         logger.debug("Creating test dataloader")
-        if self.target_type=="seq":
-            return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=collate_fn)
-        else:
-            return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=self._get_collate_fn(),
+        )
 
 
 

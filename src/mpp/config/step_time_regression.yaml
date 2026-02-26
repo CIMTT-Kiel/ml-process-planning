@@ -1,0 +1,72 @@
+# ============================================================
+# Konfiguration: Schrittweise Prozesszeit-Regression
+# (step-time-regression)
+#
+# Erbt von config/base.yaml, überschreibt task-spezifische Werte.
+# Neue Hyperparameter:
+#   training.freeze_encoder_epochs   – Epochen mit eingefrorenen Encoder (Phase 1)
+#   training.encoder_lr_factor       – Encoder-LR = lr * encoder_lr_factor (Phase 2)
+#   training.lambda_consistency      – Gewicht des Consistency-Loss
+#   training.scheduled_sampling      – Scheduled Sampling aktivieren (bool)
+#   training.scheduled_sampling_rate – Anteil der SS-Batches pro Epoche
+#
+# Optional:
+#   training.pretrained_encoder_ckpt – Pfad zu einem ProcessRegressionModule-
+#                                       Checkpoint. Wenn gesetzt, werden
+#                                       Encoder-Gewichte übernommen.
+# ============================================================
+
+mlflow:
+  experiment_name: "step-time-regression"
+  tuning_experiment_name: "step-time-regression-hyperparameter-tuning"
+
+data:
+  target_type: "step-time"
+
+training:
+  gpu_id: 1
+  tuning_epochs: 30
+  final_epochs: 1000
+  tuning_patience: 8
+  final_patience: 30
+  plot_every_n_epochs: 5
+
+  # --- Phase-1: Encoder einfrieren ---
+  freeze_encoder_epochs: 20        # Epochen, in denen nur der Decoder trainiert wird
+
+  # --- Phase-2: differentielles LR ---
+  encoder_lr_factor: 0.1           # Encoder-LR = lr * encoder_lr_factor
+
+  # --- Consistency-Loss ---
+  lambda_consistency: 0.1          # L = Huber + λ * MSE(Σ pred_times, total_time_gt)
+
+  # --- Scheduled Sampling (optional) ---
+  scheduled_sampling: false        # true → Decoder nutzt eigene Vorhersagen als Input
+  scheduled_sampling_rate: 0.5     # Anteil der Batches mit Scheduled Sampling
+
+  # --- Vortrainierter Encoder (optional) ---
+  # pretrained_encoder_ckpt: "src/mpp/ml/models/checkpoints/best_model/time-regression/..."
+
+checkpoint:
+  tuning_subdir: "tuning/step-time-regression"
+  best_subdir: "best_model/step-time-regression"
+  filename: "step-time-regressor-{epoch:02d}-{val_loss:.4f}"
+
+hyperparameter_search:
+  dropout:
+    low: 0.0
+    high: 0.3
+  lr:
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  num_encoder_layers:
+    low: 2
+    high: 4      # Muss mit vortrainiertem Encoder übereinstimmen, falls geladen
+  num_decoder_layers:
+    low: 2
+    high: 4
+  embed_dim:
+    low: 128
+    high: 256
+    step: 64    # step=64 stellt sicher, dass head_dim % 8 == 0 (num_heads=8 fix)
