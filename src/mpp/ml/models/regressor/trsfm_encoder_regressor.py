@@ -33,9 +33,29 @@ class TrsfmEncoderRegressor(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.regressor = nn.Linear(embed_dim, 1)
 
-    def forward(self, x):  # x: [B, set_size, input_dim]
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encodiert das Vector-Set ohne anschließendes Pooling.
+
+        Gibt die vollständigen per-Token-Repräsentationen zurück, die als
+        ``memory`` für einen Kreuzattentions-Decoder verwendet werden können
+        (z. B. :class:`~mpp.ml.models.regressor.step_time_decoder.StepTimeDecoder`).
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Eingabe der Form ``[B, set_size, input_dim]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoder-Ausgabe der Form ``[B, set_size, embed_dim]`` *vor* dem
+            Mean-Pooling.
+        """
         x = self.embedding(x)
-        x = self.encoder(x)
+        return self.encoder(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # x: [B, set_size, input_dim]
+        x = self.encode(x)
         x = x.mean(dim=1)           # [B, embed_dim] — permutation-invariantes Pooling
         return self.regressor(x).squeeze(-1)  # [B]
 

@@ -1,14 +1,16 @@
 """
 MLflow Artifact Callbacks
 --------------------------
-MLflowCheckpointCallback        – Loggt den besten Checkpoint als MLflow-Artefakt.
-SequencePredictionPlotCallback   – Loggt Diagnose-Plots alle N Validierungs-Epochen
-                                   (mit Epoch-Nummer im Dateinamen).
-BestModelPlotCallback            – Loggt Plots für das aktuell beste Modell;
-                                   Dateien werden immer überschrieben wenn ein
-                                   besseres Ergebnis erzielt wurde.
-RegressionPredictionPlotCallback – Loggt Regressions-Diagnose-Plots alle N Epochen.
-BestRegressionModelPlotCallback  – Loggt Regressions-Plots für das aktuell beste Modell.
+MLflowCheckpointCallback          – Loggt den besten Checkpoint als MLflow-Artefakt.
+SequencePredictionPlotCallback     – Loggt Diagnose-Plots alle N Validierungs-Epochen
+                                     (mit Epoch-Nummer im Dateinamen).
+BestModelPlotCallback              – Loggt Plots für das aktuell beste Modell;
+                                     Dateien werden immer überschrieben wenn ein
+                                     besseres Ergebnis erzielt wurde.
+RegressionPredictionPlotCallback   – Loggt Regressions-Diagnose-Plots alle N Epochen.
+BestRegressionModelPlotCallback    – Loggt Regressions-Plots für das aktuell beste Modell.
+StepTimePredictionPlotCallback     – Loggt Schrittzeit-Diagnose-Plots alle N Epochen.
+BestStepTimeModelPlotCallback      – Loggt Schrittzeit-Plots für das aktuell beste Modell.
 
 Artefakt-Struktur (cadtoseq):
   checkpoints/        – Beste Modell-Checkpoints
@@ -30,6 +32,14 @@ Artefakt-Struktur (cadtostepset):
   plots/examples/     – Vorhersage-Tabelle (epochenweise)
   plots/class_metrics/– Precision/Recall pro Prozessschritt (epochenweise)
   plots/best/         – Beide Plots für das aktuell beste Modell (wird überschrieben)
+
+Artefakt-Struktur (step-time-regression):
+  checkpoints/        – Beste Modell-Checkpoints
+  plots/scatter/      – Schrittzeit Vorhergesagt vs. Tatsächlich, nach Token eingefärbt
+  plots/token_mae/    – MAE pro Prozessschritttyp (epochenweise)
+  plots/consistency/  – Σ Schrittzeiten vs. GT-Gesamtzeit (epochenweise)
+  plots/errors/       – Fehlerverteilung Schrittzeiten (epochenweise)
+  plots/best/         – Alle vier Plots für das aktuell beste Modell (wird überschrieben)
 """
 
 import logging
@@ -41,6 +51,7 @@ import mlflow
 import numpy as np
 import seaborn as sns
 import torch
+import torch.nn.functional as F
 from pytorch_lightning import Callback
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import MLFlowLogger
@@ -769,6 +780,290 @@ class BestStepsetModelPlotCallback(_StepsetPlotMixin, Callback):
 
         self._generate_plots(
             preds, targets,
+            title_prefix=f"Bestes Modell – Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots/best",
+            filename_prefix="",
+        )
+
+
+# ---------------------------------------------------------------------------
+# StepTime-Regression: gemeinsame Basis-Klasse mit Plot-Logik
+# ---------------------------------------------------------------------------
+
+class _StepTimePlotMixin:
+    """Mixin mit geteilter Prediction-Collection und Plot-Logik für die
+    schrittweise Zeitvorhersage (step-time-regression).
+
+    Der Val-DataLoader liefert Batches ``(vecset, step_tokens, step_times, total_time)``.
+    Vorhersagen werden per Teacher Forcing erzeugt und denormalisiert.
+    """
+
+    # ------------------------------------------------------------------
+    # Predictions über den gesamten Val-Loader sammeln
+    # ------------------------------------------------------------------
+
+    def _collect_predictions(self, val_dl, pl_module) -> dict:
+        """Iteriert über den kompletten Val-Loader.
+
+        Returns
+        -------
+        dict mit Feldern
+            ``pred_flat``   – denormalisierte Vorhersagen je gültigem Schritt [N]
+            ``gt_flat``     – GT-Schrittzeiten je gültigem Schritt [N]
+            ``token_flat``  – Token-IDs je gültigem Schritt [N]
+            ``pred_total``  – Summe der Vorhersagen je Sample [M]
+            ``gt_total``    – GT-Gesamtzeit je Sample [M]
+        """
+        target_mean = getattr(pl_module.hparams, "target_mean", 0.0)
+        target_std  = getattr(pl_module.hparams, "target_std",  1.0)
+
+        all_pred_flat, all_gt_flat, all_tok_flat = [], [], []
+        all_pred_total, all_gt_total = [], []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for vecset, step_tokens, step_times, total_time in val_dl:
+                vecset      = vecset.to(pl_module.device)
+                step_tokens = step_tokens.to(pl_module.device)
+                step_times  = step_times.to(pl_module.device)
+                total_time  = total_time.to(pl_module.device)
+
+                # Teacher-Forcing-Forward
+                step_times_norm = (step_times - target_mean) / target_std
+                prev_times = F.pad(step_times_norm[:, :-1], (1, 0), value=0.0)
+                pred_norm  = pl_module.model(vecset, step_tokens, prev_times)
+                pred_abs   = pred_norm * target_std + target_mean
+
+                pad_mask = step_tokens == VOCAB["PAD"]
+                valid    = ~pad_mask
+
+                all_pred_flat.append(pred_abs[valid].cpu())
+                all_gt_flat.append(step_times[valid].cpu())
+                all_tok_flat.append(step_tokens[valid].cpu())
+
+                # Gesamtzeit pro Sample (PAD ausmaskieren)
+                pred_total = pred_abs.masked_fill(pad_mask, 0.0).sum(dim=-1)
+                all_pred_total.append(pred_total.cpu())
+                all_gt_total.append(total_time.cpu())
+
+        return {
+            "pred_flat":  torch.cat(all_pred_flat).numpy(),
+            "gt_flat":    torch.cat(all_gt_flat).numpy(),
+            "token_flat": torch.cat(all_tok_flat).numpy(),
+            "pred_total": torch.cat(all_pred_total).numpy(),
+            "gt_total":   torch.cat(all_gt_total).numpy(),
+        }
+
+    # ------------------------------------------------------------------
+    # Alle vier Plots erzeugen und loggen
+    # ------------------------------------------------------------------
+
+    def _generate_plots(self, data, title_prefix, run_id, artifact_dir, filename_prefix):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._plot_scatter(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_per_token_mae(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_consistency(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_error_distribution(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+
+    # ------------------------------------------------------------------
+    # Hilfsmethode
+    # ------------------------------------------------------------------
+
+    def _log(self, fig, path, run_id, artifact_dir):
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        mlflow.MlflowClient().log_artifact(run_id, path, artifact_path=artifact_dir)
+
+    # ------------------------------------------------------------------
+    # Plot-Methoden
+    # ------------------------------------------------------------------
+
+    def _plot_scatter(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Schrittzeit Vorhergesagt vs. Tatsächlich, nach Token-Typ eingefärbt."""
+        pred = data["pred_flat"]
+        gt   = data["gt_flat"]
+        toks = data["token_flat"]
+
+        unique_toks = np.unique(toks)
+        tab10 = plt.cm.tab10.colors  # 10 feste Farben
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        for idx, tok in enumerate(unique_toks):
+            mask  = toks == tok
+            label = INV_VOCAB.get(int(tok), str(tok))
+            color = tab10[idx % len(tab10)]
+            ax.scatter(gt[mask], pred[mask], alpha=0.4, s=15,
+                       color=color, label=label, edgecolors="none")
+
+        min_val = min(gt.min(), pred.min())
+        max_val = max(gt.max(), pred.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        ax.set_xlabel("Tatsächlich [min]")
+        ax.set_ylabel("Vorhergesagt [min]")
+        ax.set_title(f"{title_prefix} – Schrittzeiten: Vorhergesagt vs. Tatsächlich")
+        ax.legend(fontsize=8, markerscale=2)
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}scatter.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/scatter")
+
+    def _plot_per_token_mae(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Mittlerer absoluter Fehler (MAE) pro Prozessschritttyp."""
+        pred = data["pred_flat"]
+        gt   = data["gt_flat"]
+        toks = data["token_flat"]
+
+        # Sonder-Token ausblenden
+        special_ids = {VOCAB[k] for k in _SPECIAL_TOKENS if k in VOCAB}
+        unique_toks = [int(t) for t in np.unique(toks) if int(t) not in special_ids]
+
+        labels = [INV_VOCAB.get(t, str(t)) for t in unique_toks]
+        maes: list[float] = []
+        counts: list[int] = []
+        for tok in unique_toks:
+            mask = toks == tok
+            maes.append(float(np.abs(pred[mask] - gt[mask]).mean()) if mask.sum() > 0 else 0.0)
+            counts.append(int(mask.sum()))
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        bars = ax.bar(labels, maes, edgecolor="black", color="#4c72b0")
+        ax.set_ylabel("MAE [min]")
+        ax.set_title(f"{title_prefix} – MAE pro Prozessschritttyp")
+        max_mae = max(maes) if maes else 1.0
+        for bar, val, cnt in zip(bars, maes, counts):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + 0.02 * max_mae,
+                f"{val:.1f}\n(n={cnt})",
+                ha="center", va="bottom", fontsize=8,
+            )
+        ax.tick_params(axis="x", rotation=15)
+        ax.set_ylim(0, max_mae * 1.25)
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}token_mae.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/token_mae")
+
+    def _plot_consistency(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Summe der vorhergesagten Schrittzeiten vs. GT-Gesamtzeit (Konsistenz-Check)."""
+        pred_total = data["pred_total"]
+        gt_total   = data["gt_total"]
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.scatter(gt_total, pred_total, alpha=0.4, edgecolors="none", s=20, color="#c44e52")
+        min_val = min(gt_total.min(), pred_total.min())
+        max_val = max(gt_total.max(), pred_total.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        mae_total = float(np.abs(pred_total - gt_total).mean())
+        ax.set_xlabel("GT Gesamtzeit [min]")
+        ax.set_ylabel("Σ Vorhergesagte Schrittzeiten [min]")
+        ax.set_title(f"{title_prefix} – Konsistenz: Gesamtzeit  (MAE={mae_total:.1f} min)")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}consistency.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/consistency")
+
+    def _plot_error_distribution(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Verteilung der per-Schritt-Fehler als Histogramm mit KDE."""
+        errors = data["pred_flat"] - data["gt_flat"]
+        fig, ax = plt.subplots(figsize=(7, 5))
+        sns.histplot(errors, ax=ax, kde=True, color="#4c72b0", alpha=0.6)
+        ax.axvline(errors.mean(), color="red", linestyle="--", linewidth=1.5,
+                   label=f"Mittelwert: {errors.mean():.2f} min")
+        ax.axvline(0, color="black", linestyle="-", linewidth=1.0, alpha=0.5)
+        ax.set_xlabel("Fehler [min] (Vorhergesagt – Tatsächlich)")
+        ax.set_ylabel("Häufigkeit")
+        ax.set_title(f"{title_prefix} – Fehlerverteilung (Schrittzeiten)")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}errors.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/errors")
+
+
+# ---------------------------------------------------------------------------
+# Epochenweise StepTime-Plots
+# ---------------------------------------------------------------------------
+
+class StepTimePredictionPlotCallback(_StepTimePlotMixin, Callback):
+    """Loggt vier Schrittzeit-Diagnose-Plots alle ``plot_every_n_epochs`` Epochen.
+
+    Plots:
+    * Scatter (pred vs. gt, nach Token eingefärbt)
+    * MAE pro Prozessschritttyp
+    * Konsistenz-Scatter (Σ pred vs. GT-Gesamtzeit)
+    * Fehlerverteilung
+
+    Parameters
+    ----------
+    plot_every_n_epochs : int
+        Frequenz der Plot-Erzeugung.
+    """
+
+    def __init__(self, plot_every_n_epochs: int = 10):
+        self.plot_every_n_epochs = plot_every_n_epochs
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.current_epoch % self.plot_every_n_epochs != 0:
+            return
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        data = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        self._generate_plots(
+            data,
+            title_prefix=f"Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots",
+            filename_prefix=f"ep{epoch:04d}_",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Best-Model StepTime-Plots (werden überschrieben)
+# ---------------------------------------------------------------------------
+
+class BestStepTimeModelPlotCallback(_StepTimePlotMixin, Callback):
+    """Loggt vier Schrittzeit-Diagnose-Plots für das aktuell beste Modell.
+
+    Die Dateien liegen unter ``plots/best/`` und werden bei jedem neuen
+    Checkpoint-Bestwert überschrieben.
+    """
+
+    def __init__(self):
+        self._last_best_path: str = ""
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        best_path = ""
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
+                best_path = cb.best_model_path
+                break
+
+        if not best_path or best_path == self._last_best_path:
+            return
+
+        self._last_best_path = best_path
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        data = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        logger.info(
+            f"Neues bestes Modell (Epoch {epoch}) – StepTime-Best-Plots werden überschrieben."
+        )
+        self._generate_plots(
+            data,
             title_prefix=f"Bestes Modell – Epoch {epoch}",
             run_id=trainer.logger.run_id,
             artifact_dir="plots/best",
