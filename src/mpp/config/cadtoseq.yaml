@@ -12,9 +12,9 @@ data:
 
 training:
   gpu_id: 0             # GPU-Index (0 oder 1)
-  tuning_epochs: 35      # Mit patience=8 reichen ~17 Epochen bis Early Stop → Puffer für langsame Trials
+  tuning_epochs: 100      # Mit patience=8 reichen ~17 Epochen bis Early Stop → Puffer für langsame Trials
   final_epochs: 1000
-  tuning_patience: 8     # Schnellerer Exit; spart ~20% Zeit pro Trial ggü. patience=10
+  tuning_patience: 10     # Schnellerer Exit; spart ~20% Zeit pro Trial ggü. patience=10
   plot_every_n_epochs: 5
 
 checkpoint:

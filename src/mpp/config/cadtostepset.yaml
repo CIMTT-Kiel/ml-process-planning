@@ -14,7 +14,7 @@ training:
   gpu_id: 0             # GPU-Index (0 oder 1)
   tuning_epochs: 50
   final_epochs: 1000
-  tuning_patience: 5     # Deutlich unter tuning_epochs, damit Early Stop greifen kann
+  tuning_patience: 10     # Deutlich unter tuning_epochs, damit Early Stop greifen kann
   plot_every_n_epochs: 5
   pos_weight_cap: 4.0   # Begrenzt auto-berechnetes pos_weight (unkapped ~11.5 für schleifen/kontrollieren bei ~8%)
                         # Recall war in fast allen Trials ~90% → Gewicht war zu dominant, Precision litt

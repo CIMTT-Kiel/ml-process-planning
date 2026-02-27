@@ -38,12 +38,12 @@ training:
   lr: 1.0e-4
 
   # --- Tuning ---
-  tuning_epochs: 40            # Epochen pro Optuna-Trial (deckt beide Phasen ab)
-  tuning_patience: 10
+  tuning_epochs: 100           # Epochen pro Optuna-Trial (deckt beide Phasen ab)
+  tuning_patience: 15
 
   # --- Trainingsphasen ---
   freeze_encoder_epochs: 20        # Epochen mit eingefrorenen Encoder (Phase 1)
-  finetune_epochs: 200             # Epochen ab Phase 2 (Encoder aufgetaut)
+  finetune_epochs: 100             # Epochen ab Phase 2 (Encoder aufgetaut)
   final_patience: 30
 
   # --- Differentielles LR ---
@@ -63,6 +63,12 @@ training:
   # noise_overrides_cost:
   #   schweißen: 0.25
   #   kontrollieren: 0.02
+
+  # --- Tokens mit regelbasiert berechnetem Kosten (immer 0 im Datensatz) ---
+  # Diese Tokens werden aus dem Cost-Loss und den Cost-Metriken ausgeschlossen.
+  zero_cost_tokens:
+    - "prüfen"
+    - "kontrollieren"
 
   # --- Vortrainierter Encoder (optional, empfohlen) ---
   pretrained_encoder_ckpt: "/mlflow/artifacts/10/854d3674e3cf42c8b9e93495f610d0d7/artifacts/checkpoints/step-time-regressor-epoch=29-val_loss=0.1210-v1.ckpt"

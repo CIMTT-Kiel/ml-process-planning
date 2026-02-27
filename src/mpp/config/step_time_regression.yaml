@@ -25,9 +25,9 @@ data:
 
 training:
   gpu_id: 1
-  tuning_epochs: 30
+  tuning_epochs: 100
   final_epochs: 1000
-  tuning_patience: 8
+  tuning_patience: 10
   final_patience: 30
   plot_every_n_epochs: 5
 

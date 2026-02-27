@@ -13,11 +13,11 @@ data:
   # target_type wird in der jeweiligen Task-Config gesetzt
 
 training:
-  n_trials: 35          # Anzahl Optuna-Trials für Hyperparameter-Tuning
-  tuning_epochs: 50     # Max. Epochen pro Tuning-Trial
+  n_trials: 100        # Anzahl Optuna-Trials für Hyperparameter-Tuning
+  tuning_epochs: 100     # Max. Epochen pro Tuning-Trial
   final_epochs: 1000    # Max. Epochen für das finale Best-Model Training
   tuning_patience: 20   # EarlyStopping-Patience beim Tuning
-  final_patience: 30    # EarlyStopping-Patience beim finalen Training
+  final_patience: 50    # EarlyStopping-Patience beim finalen Training
   log_every_n_steps: 5
   weight_decay: 0.01
   gpu_id: 0             # GPU-Index (0 oder 1)
