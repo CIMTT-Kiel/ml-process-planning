@@ -126,6 +126,7 @@ def _build_model(
         noise_scale_cost=tr.get("noise_scale_cost", 0.0),
         noise_overrides_time=tr.get("noise_overrides_time", {}),
         noise_overrides_cost=tr.get("noise_overrides_cost", {}),
+        zero_cost_token_ids=tr.get("zero_cost_tokens", []),
     )
 
     ckpt = tr.get("pretrained_encoder_ckpt")

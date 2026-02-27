@@ -1151,12 +1151,25 @@ class _MTLPlotMixin:
                 all_pred_total_c.append(pred_c_abs.masked_fill(pad_mask, 0.0).sum(dim=-1).cpu())
                 all_gt_total_c.append(total_cost.cpu())
 
+        token_flat     = torch.cat(all_tok).numpy()
+        pred_cost_flat = torch.cat(all_pred_c).numpy()
+        gt_cost_flat   = torch.cat(all_gt_c).numpy()
+
+        # Null-Kosten-Tokens (z. B. prüfen, kontrollieren) aus Cost-Arrays entfernen,
+        # damit die Cost-Plots und MAE-Metriken nur echte Kostenpositionen zeigen.
+        zero_cost_ids = set()
+        for name in (getattr(pl_module.hparams, "zero_cost_token_ids", None) or []):
+            if name in VOCAB:
+                zero_cost_ids.add(VOCAB[name])
+        cost_valid = np.array([t not in zero_cost_ids for t in token_flat], dtype=bool)
+
         return {
             "pred_times_flat":  torch.cat(all_pred_t).numpy(),
             "gt_times_flat":    torch.cat(all_gt_t).numpy(),
-            "pred_costs_flat":  torch.cat(all_pred_c).numpy(),
-            "gt_costs_flat":    torch.cat(all_gt_c).numpy(),
-            "token_flat":       torch.cat(all_tok).numpy(),
+            "pred_costs_flat":  pred_cost_flat[cost_valid],
+            "gt_costs_flat":    gt_cost_flat[cost_valid],
+            "token_flat":       token_flat,           # ungefiltert für Zeitplots
+            "token_flat_cost":  token_flat[cost_valid],  # gefiltert für Kostenplots
             "pred_total_time":  torch.cat(all_pred_total_t).numpy(),
             "gt_total_time":    torch.cat(all_gt_total_t).numpy(),
             "pred_total_cost":  torch.cat(all_pred_total_c).numpy(),
@@ -1221,7 +1234,7 @@ class _MTLPlotMixin:
         """Schrittkosten Vorhergesagt vs. Tatsächlich, nach Token-Typ eingefärbt."""
         pred = data["pred_costs_flat"]
         gt   = data["gt_costs_flat"]
-        toks = data["token_flat"]
+        toks = data["token_flat_cost"]
 
         unique_toks = np.unique(toks)
         tab10 = plt.cm.tab10.colors
@@ -1247,18 +1260,20 @@ class _MTLPlotMixin:
 
     def _plot_per_token_mae(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
         """MAE pro Prozessschritttyp für Zeit und Kosten (nebeneinander)."""
-        toks = data["token_flat"]
+        toks_t = data["token_flat"]
+        toks_c = data["token_flat_cost"]   # ohne Null-Kosten-Tokens
         special_ids = {VOCAB[k] for k in _SPECIAL_TOKENS if k in VOCAB}
-        unique_toks = [int(t) for t in np.unique(toks) if int(t) not in special_ids]
+        unique_toks = [int(t) for t in np.unique(toks_t) if int(t) not in special_ids]
         labels = [INV_VOCAB.get(t, str(t)) for t in unique_toks]
 
         maes_t, maes_c, counts = [], [], []
         for tok in unique_toks:
-            mask = toks == tok
-            n = int(mask.sum())
+            mask_t = toks_t == tok
+            mask_c = toks_c == tok
+            n = int(mask_t.sum())
             counts.append(n)
-            maes_t.append(float(np.abs(data["pred_times_flat"][mask] - data["gt_times_flat"][mask]).mean()) if n > 0 else 0.0)
-            maes_c.append(float(np.abs(data["pred_costs_flat"][mask] - data["gt_costs_flat"][mask]).mean()) if n > 0 else 0.0)
+            maes_t.append(float(np.abs(data["pred_times_flat"][mask_t] - data["gt_times_flat"][mask_t]).mean()) if n > 0 else 0.0)
+            maes_c.append(float(np.abs(data["pred_costs_flat"][mask_c] - data["gt_costs_flat"][mask_c]).mean()) if mask_c.sum() > 0 else float("nan"))
 
         x = np.arange(len(unique_toks))
         width = 0.35
@@ -1268,16 +1283,20 @@ class _MTLPlotMixin:
             (axes[0], maes_t, "min",  "#4c72b0", "Zeit"),
             (axes[1], maes_c, "$",   "#55a868", "Kosten"),
         ]:
-            bars = ax.bar(x, maes, width=width * 2, edgecolor="black", color=color)
+            bar_colors = [color if not np.isnan(v) else "#cccccc" for v in maes]
+            bar_vals   = [v if not np.isnan(v) else 0.0 for v in maes]
+            bars = ax.bar(x, bar_vals, width=width * 2, edgecolor="black", color=bar_colors)
             ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=15, ha="right")
             ax.set_ylabel(f"MAE [{unit}]")
             ax.set_title(f"{title_prefix} – MAE {task} pro Prozessschritttyp")
-            max_mae = max(maes) if maes else 1.0
+            max_mae = max((v for v in maes if not np.isnan(v)), default=1.0)
             for bar, val, n in zip(bars, maes, counts):
                 cx = bar.get_x() + bar.get_width() / 2
-                ax.text(cx, val + 0.02 * max_mae,
-                        f"{val:.2f}", ha="center", va="bottom", fontsize=8)
+                label = "regelbasiert" if np.isnan(val) else f"{val:.2f}"
+                ax.text(cx, bar.get_height() + 0.02 * max_mae,
+                        label, ha="center", va="bottom", fontsize=8,
+                        color="gray" if np.isnan(val) else "black")
                 ax.text(cx, -0.08 * max_mae,
                         f"n={n}", ha="center", va="top", fontsize=7, color="gray")
             ax.set_ylim(-0.15 * max_mae, max_mae * 1.3)

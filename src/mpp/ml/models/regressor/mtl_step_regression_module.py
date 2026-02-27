@@ -120,6 +120,7 @@ class MTLStepTimeModule(pl.LightningModule):
         noise_scale_cost: float = 0.0,
         noise_overrides_time: dict | None = None,
         noise_overrides_cost: dict | None = None,
+        zero_cost_token_ids: list | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -178,6 +179,84 @@ class MTLStepTimeModule(pl.LightningModule):
         """Teacher-Forcing-Forward (normalisierter Raum)."""
         return self.model(vecset, step_tokens, prev_times, prev_costs)
 
+    @torch.no_grad()
+    def generate(
+        self,
+        vecset: torch.Tensor,
+        step_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Autoregressive Inferenz – gibt absolute Zeiten und Kosten zurück.
+
+        Für Tokens in ``zero_cost_token_ids`` (z. B. 'prüfen', 'kontrollieren')
+        wird die Kostenvorhersage auf 0.0 gesetzt, da deren Kosten regelbasiert
+        und nicht durch das Modell bestimmt werden.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor]
+            ``(pred_times [B, seq_len], pred_costs [B, seq_len])`` in absoluten
+            Einheiten (Minuten bzw. Dollar). PAD-Positionen sind 0.0.
+        """
+        pred_t_norm, pred_c_norm = self.model.generate(vecset, step_tokens)
+
+        pred_times = self._denormalize_time(pred_t_norm)
+        pred_costs = self._denormalize_cost(pred_c_norm)
+
+        # Null-Kosten-Tokens auf 0 setzen – nach Denormalisierung,
+        # da 0 im normierten Raum ≠ 0 in absoluten Einheiten.
+        cost_ignore = self._cost_ignore_mask(step_tokens)
+        pred_costs = pred_costs.masked_fill(cost_ignore, 0.0)
+
+        return pred_times, pred_costs
+
+    def generate_stream(
+        self,
+        vecset: torch.Tensor,
+        step_tokens: torch.Tensor,
+    ):
+        """Autoregressive Inferenz als Generator – ein Ergebnis pro Schritt.
+
+        Für Tokens in ``zero_cost_token_ids`` wird ``cost_dollar = 0.0``
+        zurückgegeben; ``cost_is_rule_based = True`` zeigt dies an.
+
+        Yields
+        ------
+        tuple[int, int, float, float, bool]
+            ``(schritt_index, token_id, zeit_min, cost_dollar, cost_is_rule_based)``
+        """
+        zero_cost_ids = set()
+        for name in (self.hparams.zero_cost_token_ids or []):
+            if name in VOCAB:
+                zero_cost_ids.add(VOCAB[name])
+
+        for step_idx, token_id, t_abs, c_abs in self.model.generate_stream(
+            vecset, step_tokens,
+            target_mean_time=self.hparams.target_mean_time,
+            target_std_time=self.hparams.target_std_time,
+            target_mean_cost=self.hparams.target_mean_cost,
+            target_std_cost=self.hparams.target_std_cost,
+        ):
+            is_rule_based = token_id in zero_cost_ids
+            yield step_idx, token_id, t_abs, 0.0 if is_rule_based else c_abs, is_rule_based
+
+    # ------------------------------------------------------------------
+    # Hilfsmethode: Kosten-Ignorier-Maske
+    # ------------------------------------------------------------------
+
+    def _cost_ignore_mask(self, step_tokens: torch.Tensor) -> torch.Tensor:
+        """PAD-Maske erweitert um Tokens mit definitionsgemäß Kosten = 0.
+
+        Tokens wie 'prüfen' und 'kontrollieren' haben im Datensatz immer
+        Kosten = 0 (regelbasiert berechnet), daher werden sie aus dem
+        Cost-Huber-Loss und den Cost-Konsistenz- und Metrik-Berechnungen
+        ausgeschlossen.
+        """
+        mask = step_tokens == VOCAB["PAD"]
+        for name in (self.hparams.zero_cost_token_ids or []):
+            if name in VOCAB:
+                mask = mask | (step_tokens == VOCAB[name])
+        return mask
+
     # ------------------------------------------------------------------
     # Noise-Injektion (Phase 2+)
     # ------------------------------------------------------------------
@@ -235,15 +314,20 @@ class MTLStepTimeModule(pl.LightningModule):
         tuple[Tensor, Tensor, Tensor, Tensor]
             ``(gesamt_loss, huber_time, huber_cost, consistency_loss)``
         """
-        pad_mask    = step_tokens == VOCAB["PAD"]                  # [B, seq_len]
-        valid_count = (~pad_mask).float().sum().clamp(min=1)
-        n_valid     = (~pad_mask).float().sum(dim=-1).clamp(min=1) # [B]
+        pad_mask        = step_tokens == VOCAB["PAD"]                   # [B, seq_len]
+        cost_ignore     = self._cost_ignore_mask(step_tokens)            # PAD + Null-Kosten-Tokens
 
-        # --- Huber pro Schritt (normiert, PAD maskiert) ---
-        huber_t_elem = self.huber(pred_t_norm, gt_t_norm)          # [B, seq_len]
+        valid_count      = (~pad_mask).float().sum().clamp(min=1)        # Skalar
+        cost_valid_count = (~cost_ignore).float().sum().clamp(min=1)     # Skalar
+
+        n_valid_time = (~pad_mask).float().sum(dim=-1).clamp(min=1)      # [B]
+        n_valid_cost = (~cost_ignore).float().sum(dim=-1).clamp(min=1)   # [B]
+
+        # --- Huber pro Schritt (normiert, maskiert) ---
+        huber_t_elem = self.huber(pred_t_norm, gt_t_norm)                # [B, seq_len]
         huber_c_elem = self.huber(pred_c_norm, gt_c_norm)
-        huber_t = huber_t_elem.masked_fill(pad_mask, 0.0).sum() / valid_count
-        huber_c = huber_c_elem.masked_fill(pad_mask, 0.0).sum() / valid_count
+        huber_t = huber_t_elem.masked_fill(pad_mask,    0.0).sum() / valid_count
+        huber_c = huber_c_elem.masked_fill(cost_ignore, 0.0).sum() / cost_valid_count
 
         # --- Kendall MTL ---
         # L = exp(-s) * Huber + s    (s = log_var, zur Optimierung stabiler)
@@ -253,17 +337,19 @@ class MTLStepTimeModule(pl.LightningModule):
         )
 
         # --- Consistency-Loss im normierten Raum ---
-        # sum(norm_i) = (total - n * mean) / std
+        # Normierung: sum(norm_i) = (total - n_valid * mean) / std
+        # Für Kosten: n_valid_cost zählt nur Tokens mit echten Kosten,
+        # da total_cost keine Beiträge von Null-Kosten-Tokens enthält.
         total_t_norm_sum = (
-            (total_time - n_valid * self.hparams.target_mean_time)
+            (total_time - n_valid_time * self.hparams.target_mean_time)
             / self.hparams.target_std_time
         )
         total_c_norm_sum = (
-            (total_cost - n_valid * self.hparams.target_mean_cost)
+            (total_cost - n_valid_cost * self.hparams.target_mean_cost)
             / self.hparams.target_std_cost
         )
-        pred_t_sum = pred_t_norm.masked_fill(pad_mask, 0.0).sum(dim=-1)  # [B]
-        pred_c_sum = pred_c_norm.masked_fill(pad_mask, 0.0).sum(dim=-1)  # [B]
+        pred_t_sum = pred_t_norm.masked_fill(pad_mask,    0.0).sum(dim=-1)  # [B]
+        pred_c_sum = pred_c_norm.masked_fill(cost_ignore, 0.0).sum(dim=-1)  # [B]
 
         consistency = (
             self.hparams.lambda_consistency_time * F.mse_loss(pred_t_sum, total_t_norm_sum)
@@ -334,18 +420,21 @@ class MTLStepTimeModule(pl.LightningModule):
             step_tokens, total_time, total_cost,
         )
 
-        # Metriken in absoluten Einheiten
-        pad_mask = step_tokens == VOCAB["PAD"]
-        pred_t_abs = self._denormalize_time(pred_t_norm).masked_fill(pad_mask, 0.0)
-        pred_c_abs = self._denormalize_cost(pred_c_norm).masked_fill(pad_mask, 0.0)
-        gt_t_abs   = step_times.masked_fill(pad_mask, 0.0)
-        gt_c_abs   = step_costs.masked_fill(pad_mask, 0.0)
+        # Metriken in absoluten Einheiten (Null-Kosten-Tokens aus Cost-Metriken ausschließen)
+        pad_mask    = step_tokens == VOCAB["PAD"]
+        cost_ignore = self._cost_ignore_mask(step_tokens)
 
-        valid = (~pad_mask).float().sum().clamp(min=1)
-        mae_t  = (pred_t_abs - gt_t_abs).abs().sum() / valid
-        mae_c  = (pred_c_abs - gt_c_abs).abs().sum() / valid
-        rmse_t = ((pred_t_abs - gt_t_abs) ** 2).sum().div(valid).sqrt()
-        rmse_c = ((pred_c_abs - gt_c_abs) ** 2).sum().div(valid).sqrt()
+        pred_t_abs = self._denormalize_time(pred_t_norm).masked_fill(pad_mask,    0.0)
+        pred_c_abs = self._denormalize_cost(pred_c_norm).masked_fill(cost_ignore, 0.0)
+        gt_t_abs   = step_times.masked_fill(pad_mask,    0.0)
+        gt_c_abs   = step_costs.masked_fill(cost_ignore, 0.0)
+
+        valid_t = (~pad_mask).float().sum().clamp(min=1)
+        valid_c = (~cost_ignore).float().sum().clamp(min=1)
+        mae_t  = (pred_t_abs - gt_t_abs).abs().sum() / valid_t
+        mae_c  = (pred_c_abs - gt_c_abs).abs().sum() / valid_c
+        rmse_t = ((pred_t_abs - gt_t_abs) ** 2).sum().div(valid_t).sqrt()
+        rmse_c = ((pred_c_abs - gt_c_abs) ** 2).sum().div(valid_c).sqrt()
 
         self.log("val_loss",         loss,        on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_huber_time",   huber_t,     on_step=False, on_epoch=True)
@@ -376,17 +465,20 @@ class MTLStepTimeModule(pl.LightningModule):
             step_tokens, total_time, total_cost,
         )
 
-        pad_mask = step_tokens == VOCAB["PAD"]
-        pred_t_abs = self._denormalize_time(pred_t_norm).masked_fill(pad_mask, 0.0)
-        pred_c_abs = self._denormalize_cost(pred_c_norm).masked_fill(pad_mask, 0.0)
-        gt_t_abs   = step_times.masked_fill(pad_mask, 0.0)
-        gt_c_abs   = step_costs.masked_fill(pad_mask, 0.0)
+        pad_mask    = step_tokens == VOCAB["PAD"]
+        cost_ignore = self._cost_ignore_mask(step_tokens)
 
-        valid = (~pad_mask).float().sum().clamp(min=1)
-        mae_t  = (pred_t_abs - gt_t_abs).abs().sum() / valid
-        mae_c  = (pred_c_abs - gt_c_abs).abs().sum() / valid
-        rmse_t = ((pred_t_abs - gt_t_abs) ** 2).sum().div(valid).sqrt()
-        rmse_c = ((pred_c_abs - gt_c_abs) ** 2).sum().div(valid).sqrt()
+        pred_t_abs = self._denormalize_time(pred_t_norm).masked_fill(pad_mask,    0.0)
+        pred_c_abs = self._denormalize_cost(pred_c_norm).masked_fill(cost_ignore, 0.0)
+        gt_t_abs   = step_times.masked_fill(pad_mask,    0.0)
+        gt_c_abs   = step_costs.masked_fill(cost_ignore, 0.0)
+
+        valid_t = (~pad_mask).float().sum().clamp(min=1)
+        valid_c = (~cost_ignore).float().sum().clamp(min=1)
+        mae_t  = (pred_t_abs - gt_t_abs).abs().sum() / valid_t
+        mae_c  = (pred_c_abs - gt_c_abs).abs().sum() / valid_c
+        rmse_t = ((pred_t_abs - gt_t_abs) ** 2).sum().div(valid_t).sqrt()
+        rmse_c = ((pred_c_abs - gt_c_abs) ** 2).sum().div(valid_c).sqrt()
 
         self.log("test_loss",        loss,        on_step=False, on_epoch=True)
         self.log("test_huber_time",  huber_t,     on_step=False, on_epoch=True)
