@@ -1069,3 +1069,374 @@ class BestStepTimeModelPlotCallback(_StepTimePlotMixin, Callback):
             artifact_dir="plots/best",
             filename_prefix="",
         )
+
+
+# ---------------------------------------------------------------------------
+# MTL-Regression: gemeinsame Basis-Klasse mit Plot-Logik (Zeit + Kosten)
+# ---------------------------------------------------------------------------
+
+class _MTLPlotMixin:
+    """Mixin mit geteilter Prediction-Collection und Plot-Logik für die
+    MTL-Schrittzeit-und-Kosten-Vorhersage (time-and-cost-per-step).
+
+    Der Val-DataLoader liefert Batches
+    ``(vecset, step_tokens, step_times, step_costs, total_time, total_cost)``.
+    Vorhersagen werden per Teacher Forcing erzeugt und denormalisiert.
+    """
+
+    # ------------------------------------------------------------------
+    # Predictions über den gesamten Val-Loader sammeln
+    # ------------------------------------------------------------------
+
+    def _collect_predictions(self, val_dl, pl_module) -> dict:
+        """Iteriert über den kompletten Val-Loader.
+
+        Returns
+        -------
+        dict mit Feldern
+            ``pred_times_flat``  – denormalisierte Zeitvorhersagen je gültigem Schritt [N]
+            ``gt_times_flat``    – GT-Schrittzeiten je gültigem Schritt [N]
+            ``pred_costs_flat``  – denormalisierte Kostenvorhersagen je gültigem Schritt [N]
+            ``gt_costs_flat``    – GT-Schrittkosten je gültigem Schritt [N]
+            ``token_flat``       – Token-IDs je gültigem Schritt [N]
+            ``pred_total_time``  – Summe der Zeit-Vorhersagen je Sample [M]
+            ``gt_total_time``    – GT-Gesamtzeit je Sample [M]
+            ``pred_total_cost``  – Summe der Kosten-Vorhersagen je Sample [M]
+            ``gt_total_cost``    – GT-Gesamtkosten je Sample [M]
+        """
+        mean_t = getattr(pl_module.hparams, "target_mean_time", 0.0)
+        std_t  = getattr(pl_module.hparams, "target_std_time",  1.0)
+        mean_c = getattr(pl_module.hparams, "target_mean_cost", 0.0)
+        std_c  = getattr(pl_module.hparams, "target_std_cost",  1.0)
+
+        all_pred_t, all_gt_t = [], []
+        all_pred_c, all_gt_c = [], []
+        all_tok = []
+        all_pred_total_t, all_gt_total_t = [], []
+        all_pred_total_c, all_gt_total_c = [], []
+
+        pl_module.eval()
+        with torch.no_grad():
+            for vecset, step_tokens, step_times, step_costs, total_time, total_cost in val_dl:
+                vecset      = vecset.to(pl_module.device)
+                step_tokens = step_tokens.to(pl_module.device)
+                step_times  = step_times.to(pl_module.device)
+                step_costs  = step_costs.to(pl_module.device)
+                total_time  = total_time.to(pl_module.device)
+                total_cost  = total_cost.to(pl_module.device)
+
+                # Teacher-Forcing-Forward: prev = GT, nach rechts verschoben
+                step_times_norm = (step_times - mean_t) / std_t
+                step_costs_norm = (step_costs - mean_c) / std_c
+                prev_times = F.pad(step_times_norm[:, :-1], (1, 0), value=0.0)
+                prev_costs = F.pad(step_costs_norm[:, :-1], (1, 0), value=0.0)
+
+                pred_t_norm, pred_c_norm = pl_module.model(
+                    vecset, step_tokens, prev_times, prev_costs
+                )
+                pred_t_abs = pred_t_norm * std_t + mean_t
+                pred_c_abs = pred_c_norm * std_c + mean_c
+
+                pad_mask = step_tokens == VOCAB["PAD"]
+                valid    = ~pad_mask
+
+                all_pred_t.append(pred_t_abs[valid].cpu())
+                all_gt_t.append(step_times[valid].cpu())
+                all_pred_c.append(pred_c_abs[valid].cpu())
+                all_gt_c.append(step_costs[valid].cpu())
+                all_tok.append(step_tokens[valid].cpu())
+
+                all_pred_total_t.append(pred_t_abs.masked_fill(pad_mask, 0.0).sum(dim=-1).cpu())
+                all_gt_total_t.append(total_time.cpu())
+                all_pred_total_c.append(pred_c_abs.masked_fill(pad_mask, 0.0).sum(dim=-1).cpu())
+                all_gt_total_c.append(total_cost.cpu())
+
+        return {
+            "pred_times_flat":  torch.cat(all_pred_t).numpy(),
+            "gt_times_flat":    torch.cat(all_gt_t).numpy(),
+            "pred_costs_flat":  torch.cat(all_pred_c).numpy(),
+            "gt_costs_flat":    torch.cat(all_gt_c).numpy(),
+            "token_flat":       torch.cat(all_tok).numpy(),
+            "pred_total_time":  torch.cat(all_pred_total_t).numpy(),
+            "gt_total_time":    torch.cat(all_gt_total_t).numpy(),
+            "pred_total_cost":  torch.cat(all_pred_total_c).numpy(),
+            "gt_total_cost":    torch.cat(all_gt_total_c).numpy(),
+        }
+
+    # ------------------------------------------------------------------
+    # Alle Plots erzeugen und loggen
+    # ------------------------------------------------------------------
+
+    def _generate_plots(self, data, title_prefix, run_id, artifact_dir, filename_prefix):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._plot_scatter_time(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_scatter_cost(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_per_token_mae(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_consistency_time(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_consistency_cost(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+            self._plot_error_distribution(data, title_prefix, tmp, run_id, artifact_dir, filename_prefix)
+
+    # ------------------------------------------------------------------
+    # Hilfsmethode
+    # ------------------------------------------------------------------
+
+    def _log(self, fig, path, run_id, artifact_dir):
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        mlflow.MlflowClient().log_artifact(run_id, path, artifact_path=artifact_dir)
+
+    # ------------------------------------------------------------------
+    # Plot-Methoden
+    # ------------------------------------------------------------------
+
+    def _plot_scatter_time(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Schrittzeit Vorhergesagt vs. Tatsächlich, nach Token-Typ eingefärbt."""
+        pred = data["pred_times_flat"]
+        gt   = data["gt_times_flat"]
+        toks = data["token_flat"]
+
+        unique_toks = np.unique(toks)
+        tab10 = plt.cm.tab10.colors
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        for idx, tok in enumerate(unique_toks):
+            mask  = toks == tok
+            label = INV_VOCAB.get(int(tok), str(tok))
+            color = tab10[idx % len(tab10)]
+            ax.scatter(gt[mask], pred[mask], alpha=0.4, s=15,
+                       color=color, label=label, edgecolors="none")
+
+        min_val = min(gt.min(), pred.min())
+        max_val = max(gt.max(), pred.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        ax.set_xlabel("Tatsächlich [min]")
+        ax.set_ylabel("Vorhergesagt [min]")
+        ax.set_title(f"{title_prefix} – Schrittzeiten: Vorhergesagt vs. Tatsächlich")
+        ax.legend(fontsize=8, markerscale=2)
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}scatter_time.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/scatter_time")
+
+    def _plot_scatter_cost(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Schrittkosten Vorhergesagt vs. Tatsächlich, nach Token-Typ eingefärbt."""
+        pred = data["pred_costs_flat"]
+        gt   = data["gt_costs_flat"]
+        toks = data["token_flat"]
+
+        unique_toks = np.unique(toks)
+        tab10 = plt.cm.tab10.colors
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        for idx, tok in enumerate(unique_toks):
+            mask  = toks == tok
+            label = INV_VOCAB.get(int(tok), str(tok))
+            color = tab10[idx % len(tab10)]
+            ax.scatter(gt[mask], pred[mask], alpha=0.4, s=15,
+                       color=color, label=label, edgecolors="none")
+
+        min_val = min(gt.min(), pred.min())
+        max_val = max(gt.max(), pred.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        ax.set_xlabel("Tatsächlich [$]")
+        ax.set_ylabel("Vorhergesagt [$]")
+        ax.set_title(f"{title_prefix} – Schrittkosten: Vorhergesagt vs. Tatsächlich")
+        ax.legend(fontsize=8, markerscale=2)
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}scatter_cost.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/scatter_cost")
+
+    def _plot_per_token_mae(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """MAE pro Prozessschritttyp für Zeit und Kosten (nebeneinander)."""
+        toks = data["token_flat"]
+        special_ids = {VOCAB[k] for k in _SPECIAL_TOKENS if k in VOCAB}
+        unique_toks = [int(t) for t in np.unique(toks) if int(t) not in special_ids]
+        labels = [INV_VOCAB.get(t, str(t)) for t in unique_toks]
+
+        maes_t, maes_c, counts = [], [], []
+        for tok in unique_toks:
+            mask = toks == tok
+            n = int(mask.sum())
+            counts.append(n)
+            maes_t.append(float(np.abs(data["pred_times_flat"][mask] - data["gt_times_flat"][mask]).mean()) if n > 0 else 0.0)
+            maes_c.append(float(np.abs(data["pred_costs_flat"][mask] - data["gt_costs_flat"][mask]).mean()) if n > 0 else 0.0)
+
+        x = np.arange(len(unique_toks))
+        width = 0.35
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        for ax, maes, unit, color, task in [
+            (axes[0], maes_t, "min",  "#4c72b0", "Zeit"),
+            (axes[1], maes_c, "$",   "#55a868", "Kosten"),
+        ]:
+            bars = ax.bar(x, maes, width=width * 2, edgecolor="black", color=color)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=15, ha="right")
+            ax.set_ylabel(f"MAE [{unit}]")
+            ax.set_title(f"{title_prefix} – MAE {task} pro Prozessschritttyp")
+            max_mae = max(maes) if maes else 1.0
+            for bar, val, n in zip(bars, maes, counts):
+                cx = bar.get_x() + bar.get_width() / 2
+                ax.text(cx, val + 0.02 * max_mae,
+                        f"{val:.2f}", ha="center", va="bottom", fontsize=8)
+                ax.text(cx, -0.08 * max_mae,
+                        f"n={n}", ha="center", va="top", fontsize=7, color="gray")
+            ax.set_ylim(-0.15 * max_mae, max_mae * 1.3)
+
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}token_mae.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/token_mae")
+
+    def _plot_consistency_time(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Σ vorhergesagte Zeiten vs. GT-Gesamtzeit."""
+        pred_total = data["pred_total_time"]
+        gt_total   = data["gt_total_time"]
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.scatter(gt_total, pred_total, alpha=0.4, edgecolors="none", s=20, color="#4c72b0")
+        min_val = min(gt_total.min(), pred_total.min())
+        max_val = max(gt_total.max(), pred_total.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        mae_total = float(np.abs(pred_total - gt_total).mean())
+        ax.set_xlabel("GT Gesamtzeit [min]")
+        ax.set_ylabel("Σ Vorhergesagte Schrittzeiten [min]")
+        ax.set_title(f"{title_prefix} – Konsistenz Zeit  (MAE={mae_total:.1f} min)")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}consistency_time.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/consistency_time")
+
+    def _plot_consistency_cost(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Σ vorhergesagte Kosten vs. GT-Gesamtkosten."""
+        pred_total = data["pred_total_cost"]
+        gt_total   = data["gt_total_cost"]
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        ax.scatter(gt_total, pred_total, alpha=0.4, edgecolors="none", s=20, color="#55a868")
+        min_val = min(gt_total.min(), pred_total.min())
+        max_val = max(gt_total.max(), pred_total.max())
+        ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=1.5, label="Ideal")
+        mae_total = float(np.abs(pred_total - gt_total).mean())
+        ax.set_xlabel("GT Gesamtkosten [$]")
+        ax.set_ylabel("Σ Vorhergesagte Schrittkosten [$]")
+        ax.set_title(f"{title_prefix} – Konsistenz Kosten  (MAE={mae_total:.2f} $)")
+        ax.legend()
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}consistency_cost.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/consistency_cost")
+
+    def _plot_error_distribution(self, data, title_prefix, tmp, run_id, artifact_dir, filename_prefix):
+        """Fehlerverteilung für Zeit und Kosten als Histogramm mit KDE."""
+        errors_t = data["pred_times_flat"] - data["gt_times_flat"]
+        errors_c = data["pred_costs_flat"] - data["gt_costs_flat"]
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        for ax, errors, unit, task in [
+            (axes[0], errors_t, "min", "Zeit"),
+            (axes[1], errors_c, "$",  "Kosten"),
+        ]:
+            sns.histplot(errors, ax=ax, kde=True, color="#4c72b0", alpha=0.6)
+            ax.axvline(errors.mean(), color="red", linestyle="--", linewidth=1.5,
+                       label=f"Mittelwert: {errors.mean():.2f} {unit}")
+            ax.axvline(0, color="black", linestyle="-", linewidth=1.0, alpha=0.5)
+            ax.set_xlabel(f"Fehler [{unit}] (Vorhergesagt – Tatsächlich)")
+            ax.set_ylabel("Häufigkeit")
+            ax.set_title(f"{title_prefix} – Fehlerverteilung ({task})")
+            ax.legend()
+
+        fig.tight_layout()
+        path = os.path.join(tmp, f"{filename_prefix}errors.png")
+        self._log(fig, path, run_id, f"{artifact_dir}/errors")
+
+
+# ---------------------------------------------------------------------------
+# Epochenweise MTL-Plots
+# ---------------------------------------------------------------------------
+
+class MTLPredictionPlotCallback(_MTLPlotMixin, Callback):
+    """Loggt sechs MTL-Diagnose-Plots alle ``plot_every_n_epochs`` Epochen.
+
+    Plots:
+    * Scatter Zeit (pred vs. gt, nach Token eingefärbt)
+    * Scatter Kosten (pred vs. gt, nach Token eingefärbt)
+    * MAE pro Prozessschritttyp (Zeit + Kosten nebeneinander)
+    * Konsistenz-Scatter Zeit (Σ pred vs. GT-Gesamtzeit)
+    * Konsistenz-Scatter Kosten (Σ pred vs. GT-Gesamtkosten)
+    * Fehlerverteilung (Zeit + Kosten)
+
+    Parameters
+    ----------
+    plot_every_n_epochs : int
+        Frequenz der Plot-Erzeugung.
+    """
+
+    def __init__(self, plot_every_n_epochs: int = 10):
+        self.plot_every_n_epochs = plot_every_n_epochs
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.current_epoch % self.plot_every_n_epochs != 0:
+            return
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        data = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        self._generate_plots(
+            data,
+            title_prefix=f"Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots",
+            filename_prefix=f"ep{epoch:04d}_",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Best-Model MTL-Plots (werden überschrieben)
+# ---------------------------------------------------------------------------
+
+class BestMTLModelPlotCallback(_MTLPlotMixin, Callback):
+    """Loggt sechs MTL-Diagnose-Plots für das aktuell beste Modell.
+
+    Die Dateien liegen unter ``plots/best/`` und werden bei jedem neuen
+    Checkpoint-Bestwert überschrieben.
+    """
+
+    def __init__(self):
+        self._last_best_path: str = ""
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not isinstance(trainer.logger, MLFlowLogger):
+            return
+
+        best_path = ""
+        for cb in trainer.callbacks:
+            if isinstance(cb, ModelCheckpoint) and cb.best_model_path:
+                best_path = cb.best_model_path
+                break
+
+        if not best_path or best_path == self._last_best_path:
+            return
+
+        self._last_best_path = best_path
+
+        val_dl = trainer.val_dataloaders
+        if isinstance(val_dl, list):
+            val_dl = val_dl[0]
+
+        data = self._collect_predictions(val_dl, pl_module)
+
+        epoch = trainer.current_epoch
+        logger.info(
+            f"Neues bestes Modell (Epoch {epoch}) – MTL-Best-Plots werden überschrieben."
+        )
+        self._generate_plots(
+            data,
+            title_prefix=f"Bestes Modell – Epoch {epoch}",
+            run_id=trainer.logger.run_id,
+            artifact_dir="plots/best",
+            filename_prefix="",
+        )

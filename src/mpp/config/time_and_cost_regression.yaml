@@ -1,0 +1,91 @@
+# ============================================================
+# Konfiguration: MTL-Schritt-Zeit-und-Kosten-Regression
+# (time-and-cost-per-step)
+#
+# Erbt von config/base.yaml, überschreibt task-spezifische Werte.
+#
+# Architektur:
+#   Encoder (TrsfmEncoderRegressor) → Decoder (MTLStepTimeDecoder)
+#   Decoder: zwei Köpfe – Zeit-Head und Kosten-Head
+#   Lernbare Kendall-MTL-Gewichte: log_var_time, log_var_cost
+#
+# Trainingsphasen:
+#   Phase 1 (0 … freeze_encoder_epochs-1): Encoder eingefroren
+#   Phase 2 (ab freeze_encoder_epochs):     Encoder mit encoder_lr_factor × lr
+#
+# Optionaler Warmstart:
+#   training.pretrained_encoder_ckpt – Pfad zu einem StepTimeRegressionModule-
+#                                      Checkpoint. Encoder-Gewichte werden übernommen.
+# ============================================================
+
+mlflow:
+  experiment_name: "time-and-cost-per-step"
+  tuning_experiment_name: "time-and-cost-per-step-hyperparameter-tuning"
+
+data:
+  target_type: "step-time-cost"
+
+training:
+  gpu_id: 0
+
+  # --- Architektur ---
+  # embed_dim und num_encoder_layers werden bei gesetztem pretrained_encoder_ckpt
+  # automatisch aus dem Checkpoint gelesen und überschreiben diese Werte.
+  embed_dim: 192
+  num_encoder_layers: 3
+  num_decoder_layers: 4
+  dropout: 0.1
+  lr: 1.0e-4
+
+  # --- Tuning ---
+  tuning_epochs: 40            # Epochen pro Optuna-Trial (deckt beide Phasen ab)
+  tuning_patience: 10
+
+  # --- Trainingsphasen ---
+  freeze_encoder_epochs: 20        # Epochen mit eingefrorenen Encoder (Phase 1)
+  finetune_epochs: 200             # Epochen ab Phase 2 (Encoder aufgetaut)
+  final_patience: 30
+
+  # --- Differentielles LR ---
+  encoder_lr_factor: 0.1           # Encoder-LR = lr * encoder_lr_factor in Phase 2
+
+  # --- Consistency-Loss (normierter Raum) ---
+  lambda_consistency_time: 0.1     # L += λ_t * MSE(Σ pred_times, total_time_gt)
+  lambda_consistency_cost: 0.1     # L += λ_c * MSE(Σ pred_costs, total_cost_gt)
+
+  # --- Noise-Injektion (Phase 2+) ---
+  noise_scale_time: 0.05           # Multiplikativer Rausch-Anteil für Vorschritt-Zeiten
+  noise_scale_cost: 0.05           # Multiplikativer Rausch-Anteil für Vorschritt-Kosten
+  # Per-Token-Overrides (optional, nach Phase-1-Evaluation setzen):
+  # noise_overrides_time:
+  #   schweißen: 0.20              # Schritttypen mit hoher Streuung → höhere Noise
+  #   kontrollieren: 0.02
+  # noise_overrides_cost:
+  #   schweißen: 0.25
+  #   kontrollieren: 0.02
+
+  # --- Vortrainierter Encoder (optional, empfohlen) ---
+  pretrained_encoder_ckpt: "/mlflow/artifacts/10/854d3674e3cf42c8b9e93495f610d0d7/artifacts/checkpoints/step-time-regressor-epoch=29-val_loss=0.1210-v1.ckpt"
+
+  # --- Plots ---
+  plot_every_n_epochs: 5
+
+checkpoint:
+  tuning_subdir: "tuning/time-and-cost-per-step"
+  best_subdir: "best_model/time-and-cost-per-step"
+  filename: "mtl-{epoch:02d}-{val_loss:.4f}"
+
+hyperparameter_search:
+  # embed_dim und num_encoder_layers sind KEIN Tuning-Parameter:
+  # Sie müssen mit dem vortrainierten Encoder-Checkpoint übereinstimmen
+  # und werden fest aus training.embed_dim / training.num_encoder_layers gelesen.
+  dropout:
+    low: 0.0
+    high: 0.3
+  lr:
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  num_decoder_layers:
+    low: 2
+    high: 4
