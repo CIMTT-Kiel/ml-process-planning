@@ -96,6 +96,58 @@ def collate_fn_step_time(batch):
 
     return vecsets, padded_tokens, padded_times, total_times
 
+def collate_fn_mtl(batch):
+    """Custom collate function für den ``"step-time-cost"``-Target-Typ.
+
+    Stapelt Geometrie-Embeddings und paddet Token-, Zeit- und Kostensequenzen
+    variabler Länge auf die längste Sequenz im Batch.
+
+    Parameters
+    ----------
+    batch : list of tuples
+        Jedes Element ist ein
+        ``(vecset, (step_tokens, step_times, step_costs, total_time, total_cost))``-
+        Tupel, wie es von :class:`~mpp.ml.datasets.fabricad.Fabricad` mit
+        ``target_type="step-time-cost"`` zurückgegeben wird.
+
+    Returns
+    -------
+    vecsets : torch.Tensor
+        Shape ``[B, set_size, input_dim]``.
+    padded_tokens : torch.Tensor
+        Shape ``[B, max_seq_len]``, PAD-Stellen mit ``VOCAB["PAD"]`` gefüllt.
+    padded_times : torch.Tensor
+        Shape ``[B, max_seq_len]``, PAD-Stellen mit ``0.0`` gefüllt.
+    padded_costs : torch.Tensor
+        Shape ``[B, max_seq_len]``, PAD-Stellen mit ``0.0`` gefüllt.
+    total_times : torch.Tensor
+        Shape ``[B]``, Gesamtdauer je Probe.
+    total_costs : torch.Tensor
+        Shape ``[B]``, Gesamtkosten je Probe.
+    """
+    vecsets, targets = zip(*batch)
+    step_tokens_list, step_times_list, step_costs_list, total_times, total_costs = zip(*targets)
+
+    vecsets = torch.stack(vecsets)                                    # [B, set_size, input_dim]
+    total_times = torch.stack(list(total_times))                      # [B]
+    total_costs = torch.stack(list(total_costs))                      # [B]
+
+    max_len = max(t.size(0) for t in step_tokens_list)
+    B = len(step_tokens_list)
+
+    padded_tokens = torch.full((B, max_len), VOCAB["PAD"], dtype=torch.long)
+    padded_times = torch.zeros(B, max_len, dtype=torch.float32)
+    padded_costs = torch.zeros(B, max_len, dtype=torch.float32)
+
+    for i, (tokens, times, costs) in enumerate(zip(step_tokens_list, step_times_list, step_costs_list)):
+        n = tokens.size(0)
+        padded_tokens[i, :n] = tokens
+        padded_times[i, :n] = times
+        padded_costs[i, :n] = costs
+
+    return vecsets, padded_tokens, padded_times, padded_costs, total_times, total_costs
+
+
 class Fabricad_datamodule(pl.LightningDataModule):
     """
     PyTorch Lightning DataModule for loading the Fabricad dataset.
@@ -161,6 +213,8 @@ class Fabricad_datamodule(pl.LightningDataModule):
             return collate_fn
         if self.target_type == "step-time":
             return collate_fn_step_time
+        if self.target_type == "step-time-cost":
+            return collate_fn_mtl
         return None  # Standard-collate von PyTorch
 
     def train_dataloader(self):

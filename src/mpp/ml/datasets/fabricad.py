@@ -56,7 +56,7 @@ class Fabricad(Dataset):
         self.target_type = target_type
         self.input_type = input_type
 
-        assert self.target_type in ["time", "cost", "step-set", "seq", "step-time"], ValueError(f"Not supported prediction type: {self.target_type}")
+        assert self.target_type in ["time", "cost", "step-set", "seq", "step-time", "step-time-cost"], ValueError(f"Not supported prediction type: {self.target_type}")
         assert self.input_type in ["vecset"], ValueError(f"Not supported input type: {self.input_type}")
 
         # check if a split file exists, if not create one
@@ -270,6 +270,8 @@ class Fabricad(Dataset):
                 return torch.Tensor(self.encode_sequence(wrapped_steps))
             case "step-time":
                 return self._parse_step_time(plan_item)
+            case "step-time-cost":
+                return self._parse_step_time_cost(plan_item)
 
             # TODO here additional items can be added
         return None
@@ -315,7 +317,50 @@ class Fabricad(Dataset):
         step_times = torch.tensor(durations_col, dtype=torch.float32)
         total_time = step_times.sum()
         return step_tokens, step_times, total_time
-    
+
+    def _parse_step_time_cost(
+        self, plan_item: "pd.DataFrame"
+    ) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        """Gibt pro-Schritt-Tokens, Dauern, Kosten sowie Gesamtzeit und -kosten zurück.
+
+        Dieselbe Filterlogik wie ``_parse_step_time``: Der erste Schritt (Index 0)
+        und ``"liefern"`` werden ausgeschlossen.
+
+        NOTE: ``total_time`` und ``total_cost`` sind jeweils die Summen der
+        *gefilterten* Schritte.  Das unterscheidet sich vom ``"time"``/``"cost"``-
+        Target, das alle Zeilen summiert.
+
+        Parameters
+        ----------
+        plan_item : pd.DataFrame
+            Geladene ``plan.csv`` für eine Probe.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+            - ``step_tokens``  : LongTensor ``[seq_len]`` mit VOCAB-IDs
+            - ``step_times``   : FloatTensor ``[seq_len]`` mit Dauern in Minuten
+            - ``step_costs``   : FloatTensor ``[seq_len]`` mit Kosten in $
+            - ``total_time``   : skalares FloatTensor (Summe der Schritt-Dauern)
+            - ``total_cost``   : skalares FloatTensor (Summe der Schritt-Kosten)
+        """
+        steps_col: list[str] = plan_item["Schritt"].tolist()[1:]
+        durations_col: list[float] = plan_item["Dauer[min]"].tolist()[1:]
+        costs_col: list[float] = plan_item["Kosten[($)]"].tolist()[1:]
+
+        if "liefern" in steps_col:
+            liefern_idx = steps_col.index("liefern")
+            steps_col.pop(liefern_idx)
+            durations_col.pop(liefern_idx)
+            costs_col.pop(liefern_idx)
+
+        step_tokens = torch.tensor(self.encode_sequence(steps_col), dtype=torch.long)
+        step_times = torch.tensor(durations_col, dtype=torch.float32)
+        step_costs = torch.tensor(costs_col, dtype=torch.float32)
+        total_time = step_times.sum()
+        total_cost = step_costs.sum()
+        return step_tokens, step_times, step_costs, total_time, total_cost
+
     def parse_input_item(self, idx):
         """
         Loads the input vector (e.g., vecset) for a given sample.
